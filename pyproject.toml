@@ -8,5 +8,5 @@ dependencies = [
     "numpy>=1.26",
     "scipy>=1.11",
     "matplotlib>=3.8",
-    "streamlit>=1.35",
+    "pyvista>=0.48.4",
 ]

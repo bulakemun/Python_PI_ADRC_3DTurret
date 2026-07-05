@@ -3,7 +3,7 @@ Reference signal generators for the control loop: square wave and sine wave.
 
 These are physics-agnostic: they operate on time values (scalar or numpy
 array) and return the commanded reference in the same shape. Amplitude,
-frequency and offset are exposed as adaptive sliders in the Streamlit UI
+frequency and offset are exposed as adaptive sliders in the PyVista UI
 (see app.py). Units are whatever the caller uses for amplitude/offset
 (the app drives these in radians after converting from slider degrees).
 """

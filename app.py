@@ -1,161 +1,173 @@
 """
-Streamlit entry point for the 3D Turret Simulation.
+Entry point for the 3D Turret Simulation (PyVista / VTK).
 
-This is the only module that wires ``control`` and ``simulation`` together and
-renders the UI. It keeps the business logic thin: the PI controllers and the
-turret plant do the work; here we build the reference, run the closed loop, and
-draw the results.
+Opens an interactive window with two live 3D views -- a world view of the
+turret model and a turret-POV camera -- and in-window sliders to tune the
+control loop while it runs. This is the only module that wires ``control`` and
+``simulation`` together; it keeps the logic thin.
 
-Loop structure (see CLAUDE.md): the reference signal is a commanded pointing
-angle. Per axis:  error = reference - angle  ->  PI  ->  commanded rate  ->
-turret integrates the rate.  Azimuth follows the selected square/sine
-reference; elevation holds the setpoint needed to point at the board.
+Per-axis loop (see CLAUDE.md):  error = reference - angle -> PI -> commanded
+rate -> the turret integrates the rate. The reference signal drives azimuth;
+elevation holds the angle that points at the board centre.
 
 Run with:
-    uv run streamlit run app.py
+    uv run python app.py
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 import numpy as np
-import streamlit as st
-import matplotlib.pyplot as plt
+import pyvista as pv
 
 from control.pi_controller import PIController
-from control.reference_signals import REFERENCE_SIGNALS
+from control.reference_signals import square_wave, sine_wave
 from simulation.turret_model import TurretModel
 from simulation.target_board import TargetBoard
+from simulation import visualization as viz
+
+# Wall-clock pacing: advance this many plant steps per rendered frame so the
+# animation runs at roughly real time (FRAME_INTERVAL_MS * SUBSTEPS ~= dt*1000).
+DT = 0.01
+SUBSTEPS = 3
+FRAME_INTERVAL_MS = 30
+RATE_LIMIT = np.radians(90.0)
 
 
-def run_simulation(
-    *,
-    signal_name,
-    amplitude_rad,
-    frequency,
-    offset_rad,
-    duty,
-    elevation_setpoint,
-    kp,
-    ki,
-    dt,
-    duration,
-    tau,
-    rate_limit,
-):
-    """Run the closed loop and return per-step arrays for plotting/rendering."""
-    signal = REFERENCE_SIGNALS[signal_name]
-    n = int(round(duration / dt)) + 1
-    t = np.arange(n) * dt
+@dataclass
+class LoopParams:
+    """Live-tunable parameters, mutated by the slider/checkbox callbacks."""
 
-    if signal_name == "square":
-        az_ref = signal(t, amplitude_rad, frequency, duty=duty, offset=offset_rad)
-    else:
-        az_ref = signal(t, amplitude_rad, frequency, offset=offset_rad)
-    el_ref = np.full(n, elevation_setpoint)
+    kp: float = 6.0
+    ki: float = 2.0
+    amplitude: float = np.radians(15.0)  # azimuth reference amplitude (rad)
+    frequency: float = 0.3               # Hz
+    use_sine: bool = False               # False -> square wave
 
-    turret = TurretModel(dt=dt, tau=tau, rate_limit=rate_limit)
-    az_ctrl = PIController(kp, ki, dt, output_limits=(-rate_limit, rate_limit))
-    el_ctrl = PIController(kp, ki, dt, output_limits=(-rate_limit, rate_limit))
 
-    az = np.zeros(n)
-    el = np.zeros(n)
-    for k in range(n):
-        az[k] = turret.azimuth
-        el[k] = turret.elevation
-        az_cmd = az_ctrl.step(az_ref[k] - turret.azimuth)
-        el_cmd = el_ctrl.step(el_ref[k] - turret.elevation)
-        turret.step(az_cmd, el_cmd)
+@dataclass
+class SimState:
+    """Everything that persists across animation frames."""
 
-    return {"t": t, "az_ref": az_ref, "el_ref": el_ref, "az": az, "el": el}
+    turret: TurretModel
+    board: TargetBoard
+    az_ctrl: PIController
+    el_ctrl: PIController
+    params: LoopParams
+    el_setpoint: float
+    t: float = 0.0
+    az_ref: float = 0.0
+    az_err: float = 0.0
+
+
+def _reference(params: LoopParams, t: float) -> float:
+    """Current azimuth reference (rad) for the selected signal."""
+    if params.use_sine:
+        return float(sine_wave(t, params.amplitude, params.frequency))
+    return float(square_wave(t, params.amplitude, params.frequency))
+
+
+def _advance(state: SimState) -> None:
+    """Step the closed loop by SUBSTEPS plant steps."""
+    p = state.params
+    state.az_ctrl.kp = state.el_ctrl.kp = p.kp
+    state.az_ctrl.ki = state.el_ctrl.ki = p.ki
+    for _ in range(SUBSTEPS):
+        state.az_ref = _reference(p, state.t)
+        az_err = state.az_ref - state.turret.azimuth
+        el_err = state.el_setpoint - state.turret.elevation
+        state.turret.step(state.az_ctrl.step(az_err), state.el_ctrl.step(el_err))
+        state.t += DT
+    state.az_err = az_err
+
+
+def _build_state() -> SimState:
+    board = TargetBoard(height_m=14.0, width=30.0, height_dim=24.0)
+    turret = TurretModel(dt=DT, tau=0.2, rate_limit=RATE_LIMIT)
+    params = LoopParams()
+    limits = (-RATE_LIMIT, RATE_LIMIT)
+    _, el_setpoint = board.required_angles(turret.base_position)
+    return SimState(
+        turret=turret,
+        board=board,
+        az_ctrl=PIController(params.kp, params.ki, DT, output_limits=limits),
+        el_ctrl=PIController(params.kp, params.ki, DT, output_limits=limits),
+        params=params,
+        el_setpoint=el_setpoint,
+    )
+
+
+def build_plotter(off_screen: bool = False):
+    """Assemble the two-view plotter, widgets, and animation tick.
+
+    Returns ``(plotter, state, tick)``. ``tick`` advances the simulation and
+    refreshes both views; ``main`` drives it on a timer, and the headless test
+    can call it directly.
+    """
+    state = _build_state()
+    pl = pv.Plotter(shape=(1, 2), window_size=(1500, 760), off_screen=off_screen)
+    pl.subplot(0, 0)
+    scene = viz.build_world_view(pl, state.turret, state.board)
+    pl.add_text("World view", position="upper_edge", font_size=11, color="white")
+
+    pl.subplot(0, 1)
+    viz.build_pov_view(pl, state.turret, state.board)
+    pl.add_text("Turret POV", position="upper_edge", font_size=11, color="white")
+
+    def tick(*_args) -> None:
+        _advance(state)
+        pl.subplot(0, 0)
+        scene.update(state.turret)
+        pl.add_text(
+            f"Kp={state.params.kp:.1f}  Ki={state.params.ki:.1f}   "
+            f"az err={np.degrees(state.az_err):+5.1f} deg",
+            position="lower_left", font_size=10, color="white", name="hud",
+        )
+        pl.subplot(0, 1)
+        viz.update_pov_camera(pl, state.turret)
+        pl.render()
+
+    if not off_screen:
+        _add_widgets(pl, state.params)
+
+    return pl, state, tick
+
+
+def _add_widgets(pl, params: LoopParams) -> None:
+    """Attach the live-tuning sliders + reference toggle to the world subplot."""
+    pl.subplot(0, 0)
+
+    def _slider(callback, rng, value, title, y):
+        pl.add_slider_widget(
+            callback, rng, value=value, title=title,
+            pointa=(0.03, y), pointb=(0.32, y), style="modern",
+            title_height=0.02, fmt="%.2f",
+        )
+
+    _slider(lambda v: setattr(params, "kp", v), [0.0, 20.0], params.kp, "Kp", 0.92)
+    _slider(lambda v: setattr(params, "ki", v), [0.0, 20.0], params.ki, "Ki", 0.80)
+    _slider(
+        lambda v: setattr(params, "amplitude", np.radians(v)),
+        [0.0, 45.0], np.degrees(params.amplitude), "Amplitude (deg)", 0.68,
+    )
+    _slider(
+        lambda v: setattr(params, "frequency", v),
+        [0.05, 2.0], params.frequency, "Frequency (Hz)", 0.56,
+    )
+
+    pl.add_checkbox_button_widget(
+        lambda flag: setattr(params, "use_sine", flag),
+        value=params.use_sine, position=(20, 20), size=28,
+        color_on="#27ae60", color_off="#7f8c8d",
+    )
+    pl.add_text("Sine (else square)", position=(58, 22), font_size=9, color="white")
 
 
 def main() -> None:
-    st.set_page_config(page_title="3D Turret Simulation", layout="wide")
-    st.title("3D Turret Simulation")
-    st.caption(
-        "2-axis turret tracking a static target board. The reference drives "
-        "azimuth; elevation holds on the board. Tune the loop live."
-    )
-
-    sb = st.sidebar
-    sb.header("Reference")
-    signal_name = sb.selectbox("Signal", list(REFERENCE_SIGNALS), index=0)
-    amplitude_deg = sb.slider("Amplitude (deg)", 0.0, 45.0, 15.0, 0.5)
-    frequency = sb.slider("Frequency (Hz)", 0.05, 2.0, 0.3, 0.05)
-    offset_deg = sb.slider("Offset / nominal bearing (deg)", -30.0, 30.0, 0.0, 1.0)
-    duty = sb.slider("Square duty", 0.1, 0.9, 0.5, 0.05) if signal_name == "square" else 0.5
-    el_setpoint_deg = sb.slider("Elevation setpoint (deg)", -20.0, 20.0, 0.0, 0.5)
-
-    sb.header("Controller (PI)")
-    kp = sb.slider("Kp", 0.0, 20.0, 6.0, 0.1)
-    ki = sb.slider("Ki", 0.0, 20.0, 2.0, 0.1)
-    rate_limit_deg = sb.slider("Rate limit (deg/s)", 5.0, 180.0, 60.0, 5.0)
-
-    sb.header("Plant & sim")
-    tau = sb.slider("Rate time constant τ (s)", 0.01, 1.0, 0.2, 0.01)
-    dt = sb.slider("Timestep dt (s)", 0.005, 0.05, 0.01, 0.005)
-    duration = sb.slider("Duration (s)", 1.0, 20.0, 8.0, 0.5)
-
-    board = TargetBoard()
-
-    result = run_simulation(
-        signal_name=signal_name,
-        amplitude_rad=np.radians(amplitude_deg),
-        frequency=frequency,
-        offset_rad=np.radians(offset_deg),
-        duty=duty,
-        elevation_setpoint=np.radians(el_setpoint_deg),
-        kp=kp,
-        ki=ki,
-        dt=dt,
-        duration=duration,
-        tau=tau,
-        rate_limit=np.radians(rate_limit_deg),
-    )
-
-    t = result["t"]
-    snapshot_t = st.slider("Snapshot time (s)", 0.0, float(t[-1]), float(t[-1]), float(dt))
-    idx = int(round(snapshot_t / dt))
-    idx = min(idx, len(t) - 1)
-
-    # Rebuild a turret at the snapshot orientation for the 3D/POV renders.
-    from simulation.visualization import draw_world_view, draw_pov_view
-
-    turret = TurretModel(dt=dt, tau=tau)
-    turret.azimuth = result["az"][idx]
-    turret.elevation = result["el"][idx]
-
-    col_world, col_pov = st.columns(2)
-    with col_world:
-        fig_w = plt.figure(figsize=(6, 5))
-        ax_w = fig_w.add_subplot(111, projection="3d")
-        draw_world_view(ax_w, turret, board)
-        st.pyplot(fig_w)
-        plt.close(fig_w)
-    with col_pov:
-        fig_p, ax_p = plt.subplots(figsize=(5, 5))
-        draw_pov_view(ax_p, turret, board)
-        st.pyplot(fig_p)
-        plt.close(fig_p)
-
-    st.subheader("Closed-loop response")
-    fig_r, (ax_az, ax_el) = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
-    ax_az.plot(t, np.degrees(result["az_ref"]), "--", color="gray", label="reference")
-    ax_az.plot(t, np.degrees(result["az"]), color="tab:blue", label="azimuth")
-    ax_az.axvline(snapshot_t, color="tab:orange", linewidth=1.0)
-    ax_az.set_ylabel("Azimuth (deg)")
-    ax_az.legend(loc="upper right", fontsize=8)
-    ax_az.grid(True, alpha=0.3)
-
-    ax_el.plot(t, np.degrees(result["el_ref"]), "--", color="gray", label="reference")
-    ax_el.plot(t, np.degrees(result["el"]), color="tab:green", label="elevation")
-    ax_el.axvline(snapshot_t, color="tab:orange", linewidth=1.0)
-    ax_el.set_ylabel("Elevation (deg)")
-    ax_el.set_xlabel("Time (s)")
-    ax_el.legend(loc="upper right", fontsize=8)
-    ax_el.grid(True, alpha=0.3)
-    st.pyplot(fig_r)
-    plt.close(fig_r)
+    pl, _state, tick = build_plotter()
+    pl.add_callback(tick, interval=FRAME_INTERVAL_MS)
+    pl.show(title="3D Turret Simulation")
 
 
 if __name__ == "__main__":

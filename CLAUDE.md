@@ -9,24 +9,24 @@ Current scope:
 - Speed control loop is a basic PI controller (no feedforward, no advanced control yet).
 - Reference signals are square and sine waves, selectable and tunable live via sliders.
 - Line of sight targets a static board 400 m downrange.
-- Visualization includes a 3D world view and, if feasible, a turret-mounted camera POV showing the target as the turret tracks it.
+- Visualization is a real-time 3D-rendered (PyVista/VTK) world view plus a turret-mounted camera POV showing the target as the turret tracks it.
 
 Out of scope for now (future work): moving base, multi-target tracking, disturbances/noise, advanced controllers (PID w/ feedforward, state-space, MPC), realistic ballistics.
 
 ## Architecture
 
-The project is split into two concerns: control and simulation, glued together by a Streamlit app.
+The project is split into two concerns: control and simulation, glued together by a PyVista app.
 
 ```
 Python_3DTurret/
-├── app.py                       # Streamlit entry point (sliders, plots, run loop)
+├── app.py                       # PyVista entry point (two 3D views, sliders, animation loop)
 ├── control/
 │   ├── pi_controller.py         # PI speed controller (per-axis)
 │   └── reference_signals.py     # square_wave(), sine_wave() generators
 ├── simulation/
 │   ├── turret_model.py          # Turret plant model (static base, 2-axis gimbal)
 │   ├── target_board.py          # Static target board geometry/position (400 m)
-│   └── visualization.py         # Matplotlib 3D world view + POV camera view
+│   └── visualization.py         # PyVista 3D world view + turret POV camera
 ├── pyproject.toml               # uv-managed project + dependencies
 └── main.py                      # uv init default entry (unused; app.py is the real entry point)
 ```
@@ -39,7 +39,7 @@ Design intent:
 Run the app with:
 
 ```
-uv run streamlit run app.py
+uv run python app.py
 ```
 
 ## Tech stack
@@ -48,8 +48,7 @@ Managed entirely through `uv` — all dependencies live in this project's `pypro
 
 - **numpy** — array math, angle/vector operations.
 - **scipy** — signal processing helpers if needed (e.g. filtering).
-- **matplotlib** (3D toolkit) — world view and turret POV rendering.
-- **streamlit** — UI shell with adaptive sliders (gains, reference type, amplitude, frequency) and live plots.
+- **pyvista** (VTK) — real-time 3D rendering of the turret world view and turret POV, plus the in-window slider/checkbox widgets (gains, reference type, amplitude, frequency) that tune the loop live.
 
 Environment setup:
 ```
