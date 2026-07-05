@@ -166,7 +166,9 @@ def _add_widgets(pl, params: LoopParams) -> None:
 
 def main() -> None:
     pl, _state, tick = build_plotter()
-    pl.add_callback(tick, interval=FRAME_INTERVAL_MS)
+    # Drive the animation on a repeating VTK timer (max_steps is effectively
+    # "run for the whole session"; the timer fires every FRAME_INTERVAL_MS).
+    pl.add_timer_event(max_steps=10_000_000, duration=FRAME_INTERVAL_MS, callback=tick)
     pl.show(title="3D Turret Simulation")
 
 
