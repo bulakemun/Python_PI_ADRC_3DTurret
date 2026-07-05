@@ -1,0 +1,76 @@
+# 3D Turret Simulation
+
+## Project overview
+
+A simulation of a 2-axis (azimuth/elevation) turret tracking a static target board. This is an early stage of a larger project; the current scope is intentionally limited.
+
+Current scope:
+- Turret base is static (no base translation/rotation yet).
+- Speed control loop is a basic PI controller (no feedforward, no advanced control yet).
+- Reference signals are square and sine waves, selectable and tunable live via sliders.
+- Line of sight targets a static board 400 m downrange.
+- Visualization includes a 3D world view and, if feasible, a turret-mounted camera POV showing the target as the turret tracks it.
+
+Out of scope for now (future work): moving base, multi-target tracking, disturbances/noise, advanced controllers (PID w/ feedforward, state-space, MPC), realistic ballistics.
+
+## Architecture
+
+The project is split into two concerns: control and simulation, glued together by a Streamlit app.
+
+```
+Python_3DTurret/
+├── app.py                       # Streamlit entry point (sliders, plots, run loop)
+├── control/
+│   ├── pi_controller.py         # PI speed controller (per-axis)
+│   └── reference_signals.py     # square_wave(), sine_wave() generators
+├── simulation/
+│   ├── turret_model.py          # Turret plant model (static base, 2-axis gimbal)
+│   ├── target_board.py          # Static target board geometry/position (400 m)
+│   └── visualization.py         # Matplotlib 3D world view + POV camera view
+├── pyproject.toml               # uv-managed project + dependencies
+└── main.py                      # uv init default entry (unused; app.py is the real entry point)
+```
+
+Design intent:
+- `control/` has no knowledge of 3D geometry — it only deals with error signals, gains, and reference generation. It should be testable with plain floats/arrays.
+- `simulation/` owns the plant (turret dynamics) and the world geometry (target board position, line-of-sight math). It consumes controller output, it does not compute it.
+- `app.py` is the only place that wires control + simulation together and renders UI. Keep it thin — business logic belongs in the two packages above.
+
+Run the app with:
+
+```
+uv run streamlit run app.py
+```
+
+## Tech stack
+
+Managed entirely through `uv` — all dependencies live in this project's `pyproject.toml` and `.venv`, not in the user's global Python environment.
+
+- **numpy** — array math, angle/vector operations.
+- **scipy** — signal processing helpers if needed (e.g. filtering).
+- **matplotlib** (3D toolkit) — world view and turret POV rendering.
+- **streamlit** — UI shell with adaptive sliders (gains, reference type, amplitude, frequency) and live plots.
+
+Environment setup:
+```
+uv sync          # install dependencies from pyproject.toml
+uv add <pkg>      # add a new dependency
+uv run <cmd>      # run any command inside the project's venv
+```
+
+Note: dependencies were declared in `pyproject.toml` during scaffolding, but `uv sync` may need to be run on the user's machine to actually download/install packages (the setup environment used to scaffold this project had restricted network access to PyPI).
+
+## Conventions
+
+- Units: SI throughout (meters, radians, seconds) unless a variable name says otherwise (e.g. `_deg`).
+- Angles: azimuth measured from the turret's forward reference direction (0 rad = facing the target board's nominal bearing), elevation measured from horizontal.
+- Coordinate frame: turret base at world origin `(0, 0, 0)`; target board centered at `(400, 0, h)` where `h` is the board's height offset.
+- Keep control code physics-agnostic (operates on scalars/arrays of error, not on 3D scene objects).
+- Prefer small, testable functions over large stateful classes where possible; use classes only where state genuinely needs to persist across simulation steps (e.g. `PIController`, `TurretModel`).
+
+## Working with Claude on this project
+
+- **When facing an ambiguous design or implementation choice, ask the user rather than guessing.** This includes: controller tuning defaults, slider ranges/step sizes, exact visualization style, coordinate/units conventions not already pinned down above, and whether a new dependency is worth adding.
+- Prefer proposing 2-3 concrete options with trade-offs over open-ended questions.
+- Since this project will grow (moving base, better controllers, more realistic dynamics are likely next), favor code that's easy to extend over premature optimization.
+- If a task requires a new library, list the option(s) and get confirmation before running `uv add`.
