@@ -188,7 +188,8 @@ def build_pov_view(plotter, turret, board) -> None:
     update_pov_camera(plotter, turret)
 
 
-def update_pov_camera(plotter, turret, aim_distance: float = 50.0) -> None:
+def update_pov_camera(plotter, turret, fov_deg: float = 40.0,
+                      aim_distance: float = 50.0) -> None:
     """Point the active subplot's camera along the barrel from the pivot."""
     pivot = turret.base_position + np.array([0.0, 0.0, PIVOT_HEIGHT])
     direction = turret.barrel_direction
@@ -198,4 +199,4 @@ def update_pov_camera(plotter, turret, aim_distance: float = 50.0) -> None:
     plotter.camera.position = tuple(pivot)
     plotter.camera.focal_point = tuple(pivot + direction * aim_distance)
     plotter.camera.up = up
-    plotter.camera.view_angle = 40.0
+    plotter.camera.view_angle = fov_deg

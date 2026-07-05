@@ -2,13 +2,17 @@
 Entry point for the 3D Turret Simulation (PyVista / VTK).
 
 Opens an interactive window with two live 3D views -- a world view of the
-turret model and a turret-POV camera -- and in-window sliders to tune the
-control loop while it runs. This is the only module that wires ``control`` and
-``simulation`` together; it keeps the logic thin.
+turret model and a turret-POV camera -- with in-window sliders to tune the
+control loop and keyboard controls to move the cameras. This is the only
+module that wires ``control`` and ``simulation`` together; it keeps the logic
+thin.
 
 Per-axis loop (see CLAUDE.md):  error = reference - angle -> PI -> commanded
 rate -> the turret integrates the rate. The reference signal drives azimuth;
 elevation holds the angle that points at the board centre.
+
+Keyboard (world view):  arrows = orbit, z / x = zoom, c = reset view.
+Keyboard (turret POV):   [ / ] = zoom out / in.
 
 Run with:
     uv run python app.py
@@ -16,7 +20,7 @@ Run with:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pyvista as pv
@@ -33,6 +37,15 @@ DT = 0.01
 SUBSTEPS = 3
 FRAME_INTERVAL_MS = 30
 RATE_LIMIT = np.radians(90.0)
+
+# Keyboard camera-control increments.
+ORBIT_DEG = 4.0
+ZOOM_FACTOR = 1.1
+POV_FOV_STEP = 4.0
+POV_FOV_RANGE = (12.0, 70.0)
+
+# Shared UI palette.
+_TEXT_BG = (0.04, 0.07, 0.10)
 
 
 @dataclass
@@ -56,6 +69,7 @@ class SimState:
     el_ctrl: PIController
     params: LoopParams
     el_setpoint: float
+    pov_fov: float = 40.0
     t: float = 0.0
     az_ref: float = 0.0
     az_err: float = 0.0
@@ -73,6 +87,7 @@ def _advance(state: SimState) -> None:
     p = state.params
     state.az_ctrl.kp = state.el_ctrl.kp = p.kp
     state.az_ctrl.ki = state.el_ctrl.ki = p.ki
+    az_err = state.az_err
     for _ in range(SUBSTEPS):
         state.az_ref = _reference(p, state.t)
         az_err = state.az_ref - state.turret.azimuth
@@ -98,8 +113,159 @@ def _build_state() -> SimState:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Text / widget styling helpers (legibility + opacity).
+# --------------------------------------------------------------------------- #
+def _style_text_prop(tp, bg_opacity: float = 0.55) -> None:
+    """Make a VTK text property legible over the 3D scene: bold white with a
+    shadow and a translucent dark background box."""
+    tp.SetColor(1.0, 1.0, 1.0)
+    tp.SetBold(True)
+    tp.SetShadow(True)
+    tp.SetFontFamilyToArial()
+    tp.SetBackgroundColor(*_TEXT_BG)
+    tp.SetBackgroundOpacity(bg_opacity)
+
+
+def _style_slider(widget) -> None:
+    """Enlarge and colour a slider so it reads clearly against the scene."""
+    rep = widget.GetRepresentation()
+    rep.SetTitleHeight(0.026)
+    rep.SetLabelHeight(0.023)
+    rep.SetTubeWidth(0.007)
+    rep.SetSliderWidth(0.030)
+    rep.SetSliderLength(0.022)
+    rep.SetEndCapWidth(0.030)
+    rep.SetEndCapLength(0.008)
+    rep.GetTubeProperty().SetColor(0.55, 0.60, 0.66)
+    rep.GetTubeProperty().SetOpacity(0.75)
+    rep.GetSliderProperty().SetColor(0.16, 0.72, 0.92)   # handle
+    rep.GetSelectedProperty().SetColor(0.22, 0.90, 0.55)
+    rep.GetCapProperty().SetColor(0.80, 0.83, 0.88)
+    rep.GetCapProperty().SetOpacity(0.85)
+    _style_text_prop(rep.GetTitleProperty(), bg_opacity=0.6)
+    _style_text_prop(rep.GetLabelProperty(), bg_opacity=0.6)
+
+
+# --------------------------------------------------------------------------- #
+# Widgets, overlays, keyboard.
+# --------------------------------------------------------------------------- #
+def _add_widgets(pl, params: LoopParams) -> None:
+    """Attach the styled live-tuning sliders + reference toggle to the world view."""
+    pl.subplot(0, 0)
+
+    def _slider(callback, rng, value, title, y):
+        w = pl.add_slider_widget(
+            callback, rng, value=value, title=title,
+            pointa=(0.035, y), pointb=(0.32, y), style="modern",
+            title_height=0.026, color="#e6edf3", fmt="%.2f",
+        )
+        _style_slider(w)
+
+    _slider(lambda v: setattr(params, "kp", v), [0.0, 20.0], params.kp, "Kp", 0.93)
+    _slider(lambda v: setattr(params, "ki", v), [0.0, 20.0], params.ki, "Ki", 0.81)
+    _slider(
+        lambda v: setattr(params, "amplitude", np.radians(v)),
+        [0.0, 45.0], np.degrees(params.amplitude), "Amplitude (deg)", 0.69,
+    )
+    _slider(
+        lambda v: setattr(params, "frequency", v),
+        [0.05, 2.0], params.frequency, "Frequency (Hz)", 0.57,
+    )
+
+    # Placed under the sliders (well above the lower-left HUD) to avoid overlap.
+    pl.add_checkbox_button_widget(
+        lambda flag: setattr(params, "use_sine", flag),
+        value=params.use_sine, position=(30, 345), size=30,
+        color_on="#27ae60", color_off="#7f8c8d", border_size=2,
+    )
+    label = pl.add_text("Sine (else square)", position=(72, 349),
+                        font_size=10, color="white")
+    _style_text_prop(label.GetTextProperty(), bg_opacity=0.5)
+
+
+def _add_keyboard_controls(pl, state: SimState) -> None:
+    """Bind keys to move the world camera and zoom the POV camera."""
+    world = pl.renderers[0]
+    initial = None  # captured lazily so it reflects the built-in view
+
+    def _remember():
+        nonlocal initial
+        cam = world.GetActiveCamera()
+        initial = (cam.GetPosition(), cam.GetFocalPoint(), cam.GetViewUp())
+
+    _remember()
+
+    def orbit(d_az=0.0, d_el=0.0):
+        cam = world.GetActiveCamera()
+        if d_az:
+            cam.Azimuth(d_az)
+        if d_el:
+            cam.Elevation(d_el)
+            cam.OrthogonalizeViewUp()
+        world.ResetCameraClippingRange()
+        pl.render()
+
+    def zoom(factor):
+        world.GetActiveCamera().Zoom(factor)
+        world.ResetCameraClippingRange()
+        pl.render()
+
+    def reset_view():
+        cam = world.GetActiveCamera()
+        pos, focal, up = initial
+        cam.SetPosition(pos)
+        cam.SetFocalPoint(focal)
+        cam.SetViewUp(up)
+        world.ResetCameraClippingRange()
+        pl.render()
+
+    def pov_zoom(delta):
+        state.pov_fov = float(np.clip(state.pov_fov + delta, *POV_FOV_RANGE))
+        pl.render()
+
+    pl.add_key_event("Left", lambda: orbit(d_az=+ORBIT_DEG))
+    pl.add_key_event("Right", lambda: orbit(d_az=-ORBIT_DEG))
+    pl.add_key_event("Up", lambda: orbit(d_el=+ORBIT_DEG))
+    pl.add_key_event("Down", lambda: orbit(d_el=-ORBIT_DEG))
+    pl.add_key_event("z", lambda: zoom(ZOOM_FACTOR))
+    pl.add_key_event("x", lambda: zoom(1.0 / ZOOM_FACTOR))
+    pl.add_key_event("plus", lambda: zoom(ZOOM_FACTOR))
+    pl.add_key_event("minus", lambda: zoom(1.0 / ZOOM_FACTOR))
+    pl.add_key_event("c", reset_view)
+    pl.add_key_event("bracketright", lambda: pov_zoom(-POV_FOV_STEP))  # ] zoom in
+    pl.add_key_event("bracketleft", lambda: pov_zoom(+POV_FOV_STEP))   # [ zoom out
+
+
+def _add_overlays(pl, hud_text: str = "") -> object:
+    """Add view titles, the POV reticle, and the controls legend. Returns the
+    world-view HUD annotation so the animation loop can update it."""
+    pl.subplot(0, 0)
+    title_w = pl.add_text("World view", position="upper_edge", font_size=13,
+                          color="white")
+    _style_text_prop(title_w.GetTextProperty(), bg_opacity=0.5)
+    help_txt = pl.add_text(
+        "arrows: orbit   z / x: zoom   c: reset\n"
+        "[ / ]: POV zoom   q: quit",
+        position="lower_right", font_size=10, color="#dfe6ee",
+    )
+    _style_text_prop(help_txt.GetTextProperty(), bg_opacity=0.5)
+    hud = pl.add_text(hud_text, position="lower_left", font_size=12,
+                      color="white", name="hud")
+    _style_text_prop(hud.GetTextProperty(), bg_opacity=0.6)
+
+    pl.subplot(0, 1)
+    title_p = pl.add_text("Turret POV", position="upper_edge", font_size=13,
+                          color="white")
+    _style_text_prop(title_p.GetTextProperty(), bg_opacity=0.5)
+    reticle = pl.add_text("+", position=(0.487, 0.472), viewport=True,
+                          font_size=26, color="#efe36a")
+    reticle.GetTextProperty().SetBold(True)
+    return hud
+
+
 def build_plotter(off_screen: bool = False):
-    """Assemble the two-view plotter, widgets, and animation tick.
+    """Assemble the two-view plotter, widgets, overlays, keyboard, and tick.
 
     Returns ``(plotter, state, tick)``. ``tick`` advances the simulation and
     refreshes both views; ``main`` drives it on a timer, and the headless test
@@ -107,61 +273,39 @@ def build_plotter(off_screen: bool = False):
     """
     state = _build_state()
     pl = pv.Plotter(shape=(1, 2), window_size=(1500, 760), off_screen=off_screen)
+
     pl.subplot(0, 0)
     scene = viz.build_world_view(pl, state.turret, state.board)
-    pl.add_text("World view", position="upper_edge", font_size=11, color="white")
 
     pl.subplot(0, 1)
     viz.build_pov_view(pl, state.turret, state.board)
-    pl.add_text("Turret POV", position="upper_edge", font_size=11, color="white")
+
+    hud = _add_overlays(pl)
+
+    try:
+        pl.enable_anti_aliasing("fxaa")
+    except Exception:  # pragma: no cover - backend dependent
+        pass
 
     def tick(*_args) -> None:
         _advance(state)
         pl.subplot(0, 0)
         scene.update(state.turret)
-        pl.add_text(
-            f"Kp={state.params.kp:.1f}  Ki={state.params.ki:.1f}   "
-            f"az err={np.degrees(state.az_err):+5.1f} deg",
-            position="lower_left", font_size=10, color="white", name="hud",
+        signal = "sine" if state.params.use_sine else "square"
+        hud.SetText(
+            0,
+            f"Kp={state.params.kp:.1f}  Ki={state.params.ki:.1f}  ref={signal}\n"
+            f"az err={np.degrees(state.az_err):+5.1f} deg   "
+            f"POV fov={state.pov_fov:.0f} deg",
         )
         pl.subplot(0, 1)
-        viz.update_pov_camera(pl, state.turret)
+        viz.update_pov_camera(pl, state.turret, fov_deg=state.pov_fov)
         pl.render()
 
-    if not off_screen:
-        _add_widgets(pl, state.params)
+    _add_widgets(pl, state.params)
+    _add_keyboard_controls(pl, state)
 
     return pl, state, tick
-
-
-def _add_widgets(pl, params: LoopParams) -> None:
-    """Attach the live-tuning sliders + reference toggle to the world subplot."""
-    pl.subplot(0, 0)
-
-    def _slider(callback, rng, value, title, y):
-        pl.add_slider_widget(
-            callback, rng, value=value, title=title,
-            pointa=(0.03, y), pointb=(0.32, y), style="modern",
-            title_height=0.02, fmt="%.2f",
-        )
-
-    _slider(lambda v: setattr(params, "kp", v), [0.0, 20.0], params.kp, "Kp", 0.92)
-    _slider(lambda v: setattr(params, "ki", v), [0.0, 20.0], params.ki, "Ki", 0.80)
-    _slider(
-        lambda v: setattr(params, "amplitude", np.radians(v)),
-        [0.0, 45.0], np.degrees(params.amplitude), "Amplitude (deg)", 0.68,
-    )
-    _slider(
-        lambda v: setattr(params, "frequency", v),
-        [0.05, 2.0], params.frequency, "Frequency (Hz)", 0.56,
-    )
-
-    pl.add_checkbox_button_widget(
-        lambda flag: setattr(params, "use_sine", flag),
-        value=params.use_sine, position=(20, 20), size=28,
-        color_on="#27ae60", color_off="#7f8c8d",
-    )
-    pl.add_text("Sine (else square)", position=(58, 22), font_size=9, color="white")
 
 
 def main() -> None:

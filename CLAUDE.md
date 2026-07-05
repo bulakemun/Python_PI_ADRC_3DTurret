@@ -42,6 +42,10 @@ Run the app with:
 uv run python app.py
 ```
 
+In-window controls: sliders tune Kp/Ki/amplitude/frequency and a checkbox
+toggles square/sine. Keyboard moves the cameras — arrows orbit the world view,
+`z`/`x` zoom it, `c` resets it, and `[`/`]` zoom the turret POV.
+
 ## Tech stack
 
 Managed entirely through `uv` — all dependencies live in this project's `pyproject.toml` and `.venv`, not in the user's global Python environment.
