@@ -27,13 +27,19 @@ import numpy as np
 import pyvista as pv
 
 #: Height of the barrel pivot above the ground (metres).
-PIVOT_HEIGHT = 1.2
+PIVOT_HEIGHT = 1.35
 #: Barrel length (metres).
 BARREL_LENGTH = 2.4
+#: Top surface of the Stewart platform the turret base sits on (metres).
+PLATFORM_TOP = 0.55
+#: Point the base disturbance tilts about (centre of the platform top).
+_P0 = np.array([0.0, 0.0, PLATFORM_TOP])
 
 # Palette.
 _COL_BASE = "#3a3f4b"
 _COL_PLATFORM = "#5b6472"
+_COL_STEWART = "#2f333c"
+_COL_ACTUATOR = "#9aa3ad"
 _COL_BARREL = "#8a929e"
 _COL_GROUND = "#3d5641"
 _COL_TRUNK = "#5b3a21"
@@ -73,6 +79,33 @@ def yaw_transform(azimuth: float, pivot: np.ndarray) -> np.ndarray:
 def barrel_transform(azimuth: float, elevation: float, pivot: np.ndarray) -> np.ndarray:
     """Transform mapping the local barrel frame to the world (yaw then pitch)."""
     return _matrix(_rot_z(azimuth) @ _rot_y(-elevation), pivot)
+
+
+def _base_rotation(base_yaw: float, base_pitch: float) -> np.ndarray:
+    """3x3 base disturbance rotation: yaw about z then pitch about y."""
+    return _rot_z(base_yaw) @ _rot_y(-base_pitch)
+
+
+def base_tilt_matrix(base_yaw: float, base_pitch: float) -> np.ndarray:
+    """4x4 transform tilting the whole turret about the platform top ``_P0``."""
+    r = _base_rotation(base_yaw, base_pitch)
+    to = _matrix(np.eye(3), _P0)
+    back = _matrix(np.eye(3), -_P0)
+    return to @ _matrix(r, np.zeros(3)) @ back
+
+
+def barrel_world_direction(gimbal_az: float, gimbal_el: float,
+                           base_yaw: float = 0.0, base_pitch: float = 0.0) -> np.ndarray:
+    """Unit line-of-sight vector: base disturbance composed with the gimbal."""
+    r = _base_rotation(base_yaw, base_pitch) @ (_rot_z(gimbal_az) @ _rot_y(-gimbal_el))
+    return r @ np.array([1.0, 0.0, 0.0])
+
+
+def los_angles(gimbal_az: float, gimbal_el: float,
+               base_yaw: float = 0.0, base_pitch: float = 0.0):
+    """Line-of-sight (azimuth, elevation) in radians for the composed pointing."""
+    d = barrel_world_direction(gimbal_az, gimbal_el, base_yaw, base_pitch)
+    return float(np.arctan2(d[1], d[0])), float(np.arcsin(np.clip(d[2], -1.0, 1.0)))
 
 
 # --------------------------------------------------------------------------- #
@@ -121,20 +154,73 @@ def _turret_barrel_mesh() -> pv.PolyData:
     return reduce(lambda a, b: a + b, [barrel, mantlet, muzzle, breech, trunnion])
 
 
+def _hex_anchors(radius: float, z: float, offset_deg: float) -> np.ndarray:
+    """Six anchor points evenly spaced on a circle (homogeneous, 6x4)."""
+    ang = np.radians(offset_deg) + np.arange(6) * (np.pi / 3.0)
+    pts = np.column_stack([radius * np.cos(ang), radius * np.sin(ang),
+                           np.full(6, z), np.ones(6)])
+    return pts
+
+
+def _make_stewart_platform():
+    """Return (bottom_plate, top_plate, legs_polydata, top_anchor_rest 6x4).
+
+    A fixed hexagonal bottom plate, a moving top plate the turret sits on, and
+    six actuator legs whose upper ends ride with the tilting top plate.
+    """
+    bottom = pv.Cylinder(center=(0, 0, 0.09), direction=(0, 0, 1), radius=0.95,
+                         height=0.18, resolution=6)
+    top = pv.Cylinder(center=(0, 0, PLATFORM_TOP - 0.09), direction=(0, 0, 1),
+                      radius=0.78, height=0.18, resolution=6)
+
+    bottom_anchors = _hex_anchors(0.86, 0.18, offset_deg=18.0)
+    top_anchors = _hex_anchors(0.6, PLATFORM_TOP - 0.18, offset_deg=-18.0)
+
+    # Legs: point set [b0..b5, t0..t5] with a line cell b_i -> t_i.
+    pts = np.vstack([bottom_anchors[:, :3], top_anchors[:, :3]])
+    lines = np.hstack([[2, i, i + 6] for i in range(6)]).astype(np.int64)
+    legs = pv.PolyData(pts, lines=lines)
+    return bottom, top, legs, top_anchors
+
+
 @dataclass
 class TurretScene:
-    """Holds the world-view actors that move each frame and the pivot point."""
+    """Holds the world-view actors that move each frame plus the Stewart legs."""
 
     pivot: np.ndarray
-    platform_actor: object = field(default=None)
+    platform_actor: object = field(default=None)   # gimbal yaw ring
     barrel_actor: object = field(default=None)
+    base_actor: object = field(default=None)       # base column
+    top_plate_actor: object = field(default=None)  # Stewart top plate
+    legs_mesh: object = field(default=None)
+    legs_top_rest: np.ndarray = field(default=None)  # 6x4 rest positions
 
-    def update(self, turret) -> None:
+    def update(self, turret, base_yaw: float = 0.0, base_pitch: float = 0.0) -> None:
         az, el = turret.orientation
+        tilt = base_tilt_matrix(base_yaw, base_pitch)
+
+        # Base column + Stewart top plate ride the disturbance tilt.
+        if self.base_actor is not None:
+            self.base_actor.user_matrix = tilt
+        if self.top_plate_actor is not None:
+            self.top_plate_actor.user_matrix = tilt
+
+        # Gimbal ring and barrel: tilt, then place at the pivot with the gimbal.
+        place = _matrix(np.eye(3), self.pivot)
         if self.platform_actor is not None:
-            self.platform_actor.user_matrix = yaw_transform(az, self.pivot)
+            self.platform_actor.user_matrix = tilt @ place @ _matrix(_rot_z(az),
+                                                                     np.zeros(3))
         if self.barrel_actor is not None:
-            self.barrel_actor.user_matrix = barrel_transform(az, el, self.pivot)
+            self.barrel_actor.user_matrix = (
+                tilt @ place @ _matrix(_rot_z(az) @ _rot_y(-el), np.zeros(3))
+            )
+
+        # Actuator legs: upper ends follow the tilting top plate.
+        if self.legs_mesh is not None and self.legs_top_rest is not None:
+            tops = (tilt @ self.legs_top_rest.T).T[:, :3]
+            pts = self.legs_mesh.points.copy()
+            pts[6:12] = tops
+            self.legs_mesh.points = pts
 
 
 # --------------------------------------------------------------------------- #
@@ -227,6 +313,16 @@ def _make_trees(assets: Dict[str, Optional[str]], board, count: int = 90,
         _add_conifer(trunks, foliage, bx + rr * np.cos(th), by + rr * np.sin(th),
                      rng.uniform(2.8, 5.2))
 
+    # Corridor sides: trees between the turret and the target, flanking the line
+    # of sight. Kept off the centre (|y| >= 14 m) so the board stays visible.
+    side_count = 28
+    placed = 0
+    while placed < side_count:
+        x = rng.uniform(45.0, board.position[0] - 40.0)
+        y = (1.0 if rng.random() < 0.5 else -1.0) * rng.uniform(14.0, 48.0)
+        placed += 1
+        _add_conifer(trunks, foliage, x, y, rng.uniform(2.6, 4.8))
+
     trunk_mesh = reduce(lambda p, q: p.merge(q), trunks)
     foliage_mesh = reduce(lambda p, q: p.merge(q), foliage)
     return trunk_mesh, foliage_mesh, _texture(assets.get("bark"))
@@ -297,18 +393,31 @@ def build_world_view(plotter, turret, board, env: dict) -> TurretScene:
 
     _add_environment(plotter, board, env)
 
+    # Stewart platform: fixed bottom plate, moving top plate + actuator legs.
+    bottom_plate, top_plate, legs, top_rest = _make_stewart_platform()
+    plotter.add_mesh(bottom_plate, color=_COL_STEWART, ambient=0.3,
+                     smooth_shading=True)
+    top_plate_actor = plotter.add_mesh(top_plate, color=_COL_STEWART, ambient=0.3,
+                                       smooth_shading=True)
+    legs_actor = plotter.add_mesh(legs, color=_COL_ACTUATOR, line_width=9,
+                                  render_lines_as_tubes=True)
+
+    # Turret base column sits on the platform top.
     base = pv.Cylinder(
-        center=turret.base_position + np.array([0, 0, PIVOT_HEIGHT / 2]),
-        direction=(0, 0, 1), radius=0.5, height=PIVOT_HEIGHT,
+        center=(0, 0, (PLATFORM_TOP + PIVOT_HEIGHT) / 2),
+        direction=(0, 0, 1), radius=0.5, height=PIVOT_HEIGHT - PLATFORM_TOP,
     )
-    plotter.add_mesh(base, color=_COL_BASE, ambient=0.25, smooth_shading=True)
+    base_actor = plotter.add_mesh(base, color=_COL_BASE, ambient=0.25,
+                                  smooth_shading=True)
     platform_actor = plotter.add_mesh(_turret_platform_mesh(), color=_COL_PLATFORM,
                                       ambient=0.25, smooth_shading=True)
     barrel_actor = plotter.add_mesh(_turret_barrel_mesh(), color=_COL_BARREL,
                                     metallic=0.4, roughness=0.5, smooth_shading=True)
 
     scene = TurretScene(pivot=pivot, platform_actor=platform_actor,
-                        barrel_actor=barrel_actor)
+                        barrel_actor=barrel_actor, base_actor=base_actor,
+                        top_plate_actor=top_plate_actor, legs_mesh=legs,
+                        legs_top_rest=top_rest)
     scene.update(turret)
 
     plotter.add_axes()
@@ -328,11 +437,18 @@ def build_pov_view(plotter, turret, board, env: dict) -> None:
     update_pov_camera(plotter, turret)
 
 
-def update_pov_camera(plotter, turret, fov_deg: float = 40.0,
-                      aim_distance: float = 50.0) -> None:
-    """Point the active subplot's camera along the barrel from the pivot."""
-    pivot = turret.base_position + np.array([0.0, 0.0, PIVOT_HEIGHT])
-    direction = turret.barrel_direction
+def update_pov_camera(plotter, turret, base_yaw: float = 0.0, base_pitch: float = 0.0,
+                      fov_deg: float = 40.0, aim_distance: float = 50.0) -> None:
+    """Point the active subplot's camera along the (disturbed) line of sight.
+
+    The eye rides the tilting platform and the view direction is the composed
+    base-plus-gimbal pointing, so the POV reflects both the disturbance and the
+    controller's stabilisation.
+    """
+    pivot_rest = np.array([0.0, 0.0, PIVOT_HEIGHT, 1.0])
+    pivot = (base_tilt_matrix(base_yaw, base_pitch) @ pivot_rest)[:3]
+    direction = barrel_world_direction(turret.azimuth, turret.elevation,
+                                       base_yaw, base_pitch)
     up = (0.0, 0.0, 1.0)
     if abs(direction[2]) > 0.98:  # looking nearly straight up/down
         up = (1.0, 0.0, 0.0)

@@ -5,13 +5,16 @@
 A simulation of a 2-axis (azimuth/elevation) turret tracking a static target board. This is an early stage of a larger project; the current scope is intentionally limited.
 
 Current scope:
-- Turret base is static (no base translation/rotation yet).
+- Turret base carries a Stewart-platform disturbance: sinusoidal yaw/pitch base
+  motion (magnitude 3-15 deg, frequency 0.1-0.4 Hz) the controller must reject.
 - Speed control loop is a basic PI controller (no feedforward, no advanced control yet).
+  It regulates the line of sight (base disturbance + gimbal), i.e. gyro-style stabilization.
 - Reference signals are square and sine waves, selectable and tunable live via sliders.
 - Line of sight targets a static board 400 m downrange.
 - Visualization is a real-time 3D-rendered (PyVista/VTK) world view plus a turret-mounted camera POV showing the target as the turret tracks it.
 
-Out of scope for now (future work): moving base, multi-target tracking, disturbances/noise, advanced controllers (PID w/ feedforward, state-space, MPC), realistic ballistics.
+Out of scope for now (future work): base translation, multi-target tracking, sensor
+noise, advanced controllers (PID w/ feedforward, state-space, MPC), realistic ballistics.
 
 ## Architecture
 
@@ -24,11 +27,13 @@ Python_3DTurret/
 │   ├── pi_controller.py         # PI speed controller (per-axis)
 │   └── reference_signals.py     # square_wave(), sine_wave() generators
 ├── simulation/
-│   ├── turret_model.py          # Turret plant model (static base, 2-axis gimbal)
+│   ├── turret_model.py          # Turret plant model (2-axis gimbal, first-order rate)
 │   ├── target_board.py          # Static target board geometry/position (400 m)
+│   ├── stewart_platform.py      # Base yaw/pitch sine disturbance (StewartDisturbance)
 │   ├── assets.py                # Downloads/caches scenery textures + mountain mesh
 │   └── visualization.py         # PyVista 3D world view + turret POV camera + scenery
 ├── assets/                      # Downloaded scenery (gitignored; fetched on first run)
+├── tests/test_system.py         # System tests (uv run python tests/test_system.py)
 ├── pyproject.toml               # uv-managed project + dependencies
 └── main.py                      # uv init default entry (unused; app.py is the real entry point)
 ```
@@ -44,10 +49,15 @@ Run the app with:
 uv run python app.py
 ```
 
-In-window controls: sliders tune Kp/Ki/amplitude/frequency and a checkbox
-toggles square/sine. Keyboard moves the cameras — arrows orbit the world view,
-`z`/`x` zoom it, `c` resets it, and `[`/`]` zoom the turret POV. The world-view
-orbit is roll-free (yaw/pitch only), for both keyboard and mouse (terrain style).
+In-window controls: a left slider column tunes the loop (Kp/Ki/amplitude/frequency,
+plus a square/sine toggle); a right column tunes the Stewart-platform disturbance
+(yaw/pitch magnitude and frequency). Keyboard moves the cameras — arrows orbit the
+world view, `z`/`x` zoom it, `c` resets it, and `[`/`]` zoom the turret POV. The
+world-view orbit is roll-free (yaw/pitch only), for both keyboard and mouse (terrain
+style).
+
+Tests: `uv run python tests/test_system.py` (controller, disturbance, LOS
+composition, disturbance rejection, tree placement, headless render).
 
 Scenery (ground grass texture, tree bark, and a distant mountain elevation
 mesh) is downloaded on first run by `simulation/assets.py` — grass/bark from

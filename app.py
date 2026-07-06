@@ -29,6 +29,7 @@ from control.pi_controller import PIController
 from control.reference_signals import square_wave, sine_wave
 from simulation.turret_model import TurretModel
 from simulation.target_board import TargetBoard
+from simulation.stewart_platform import StewartDisturbance
 from simulation import visualization as viz
 from simulation import assets as assets_mod
 
@@ -69,11 +70,14 @@ class SimState:
     az_ctrl: PIController
     el_ctrl: PIController
     params: LoopParams
+    stewart: StewartDisturbance
     el_setpoint: float
     pov_fov: float = 40.0
     t: float = 0.0
     az_ref: float = 0.0
     az_err: float = 0.0
+    base_yaw: float = 0.0
+    base_pitch: float = 0.0
 
 
 def _reference(params: LoopParams, t: float) -> float:
@@ -84,17 +88,26 @@ def _reference(params: LoopParams, t: float) -> float:
 
 
 def _advance(state: SimState) -> None:
-    """Step the closed loop by SUBSTEPS plant steps."""
+    """Step the closed loop by SUBSTEPS plant steps.
+
+    The Stewart platform disturbs the base (yaw/pitch), so the controller
+    regulates the *line of sight* (base + gimbal), stabilising the pointing
+    against the disturbance rather than just the gimbal angle.
+    """
     p = state.params
     state.az_ctrl.kp = state.el_ctrl.kp = p.kp
     state.az_ctrl.ki = state.el_ctrl.ki = p.ki
     az_err = state.az_err
+    turret = state.turret
     for _ in range(SUBSTEPS):
+        by, bp = state.stewart.angles(state.t)
+        los_az, los_el = viz.los_angles(turret.azimuth, turret.elevation, by, bp)
         state.az_ref = _reference(p, state.t)
-        az_err = state.az_ref - state.turret.azimuth
-        el_err = state.el_setpoint - state.turret.elevation
-        state.turret.step(state.az_ctrl.step(az_err), state.el_ctrl.step(el_err))
+        az_err = state.az_ref - los_az
+        el_err = state.el_setpoint - los_el
+        turret.step(state.az_ctrl.step(az_err), state.el_ctrl.step(el_err))
         state.t += DT
+        state.base_yaw, state.base_pitch = by, bp
     state.az_err = az_err
 
 
@@ -103,13 +116,16 @@ def _build_state() -> SimState:
     turret = TurretModel(dt=DT, tau=0.2, rate_limit=RATE_LIMIT)
     params = LoopParams()
     limits = (-RATE_LIMIT, RATE_LIMIT)
-    _, el_setpoint = board.required_angles(turret.base_position)
+    # Elevation setpoint that points the line of sight at the board centre.
+    pivot = turret.base_position + np.array([0.0, 0.0, viz.PIVOT_HEIGHT])
+    _, el_setpoint = board.required_angles(pivot)
     return SimState(
         turret=turret,
         board=board,
         az_ctrl=PIController(params.kp, params.ki, DT, output_limits=limits),
         el_ctrl=PIController(params.kp, params.ki, DT, output_limits=limits),
         params=params,
+        stewart=StewartDisturbance(),
         el_setpoint=el_setpoint,
     )
 
@@ -199,28 +215,45 @@ class _OrbitController:
 # --------------------------------------------------------------------------- #
 # Widgets, overlays, keyboard.
 # --------------------------------------------------------------------------- #
-def _add_widgets(pl, params: LoopParams) -> None:
-    """Attach the styled live-tuning sliders + reference toggle to the world view."""
-    pl.subplot(0, 0)
+def _add_widgets(pl, state: SimState) -> None:
+    """Attach the styled live-tuning sliders + reference toggle to the world view.
 
-    def _slider(callback, rng, value, title, y):
+    Two columns: the control loop (Kp/Ki/reference) on the left, and the Stewart
+    platform disturbance (yaw/pitch magnitude + frequency) on the right.
+    """
+    pl.subplot(0, 0)
+    params, stewart = state.params, state.stewart
+
+    def _slider(callback, rng, value, title, x0, x1, y):
         w = pl.add_slider_widget(
             callback, rng, value=value, title=title,
-            pointa=(0.035, y), pointb=(0.32, y), style="modern",
-            title_height=0.026, color="#e6edf3", fmt="%.2f",
+            pointa=(x0, y), pointb=(x1, y), style="modern",
+            title_height=0.024, color="#e6edf3", fmt="%.2f",
         )
         _style_slider(w)
 
-    _slider(lambda v: setattr(params, "kp", v), [0.0, 20.0], params.kp, "Kp", 0.93)
-    _slider(lambda v: setattr(params, "ki", v), [0.0, 20.0], params.ki, "Ki", 0.81)
-    _slider(
-        lambda v: setattr(params, "amplitude", np.radians(v)),
-        [0.0, 45.0], np.degrees(params.amplitude), "Amplitude (deg)", 0.69,
-    )
-    _slider(
-        lambda v: setattr(params, "frequency", v),
-        [0.05, 2.0], params.frequency, "Frequency (Hz)", 0.57,
-    )
+    # Left column -- control loop.
+    lx0, lx1 = 0.035, 0.30
+    _slider(lambda v: setattr(params, "kp", v), [0.0, 20.0], params.kp, "Kp",
+            lx0, lx1, 0.90)
+    _slider(lambda v: setattr(params, "ki", v), [0.0, 20.0], params.ki, "Ki",
+            lx0, lx1, 0.78)
+    _slider(lambda v: setattr(params, "amplitude", np.radians(v)),
+            [0.0, 45.0], np.degrees(params.amplitude), "Amplitude (deg)",
+            lx0, lx1, 0.66)
+    _slider(lambda v: setattr(params, "frequency", v),
+            [0.05, 2.0], params.frequency, "Frequency (Hz)", lx0, lx1, 0.54)
+
+    # Right column -- Stewart platform disturbance (magnitude 3-15 deg, freq 0.1-0.4 Hz).
+    rx0, rx1 = 0.37, 0.635
+    _slider(lambda v: setattr(stewart, "yaw_mag_deg", v),
+            [3.0, 15.0], stewart.yaw_mag_deg, "Yaw dist (deg)", rx0, rx1, 0.90)
+    _slider(lambda v: setattr(stewart, "yaw_freq_hz", v),
+            [0.1, 0.4], stewart.yaw_freq_hz, "Yaw freq (Hz)", rx0, rx1, 0.78)
+    _slider(lambda v: setattr(stewart, "pitch_mag_deg", v),
+            [3.0, 15.0], stewart.pitch_mag_deg, "Pitch dist (deg)", rx0, rx1, 0.66)
+    _slider(lambda v: setattr(stewart, "pitch_freq_hz", v),
+            [0.1, 0.4], stewart.pitch_freq_hz, "Pitch freq (Hz)", rx0, rx1, 0.54)
 
     # Placed under the sliders (well above the lower-left HUD) to avoid overlap.
     pl.add_checkbox_button_widget(
@@ -321,19 +354,22 @@ def build_plotter(off_screen: bool = False):
     def tick(*_args) -> None:
         _advance(state)
         pl.subplot(0, 0)
-        scene.update(state.turret)
+        scene.update(state.turret, state.base_yaw, state.base_pitch)
         signal = "sine" if state.params.use_sine else "square"
         hud.SetText(
             0,
             f"Kp={state.params.kp:.1f}  Ki={state.params.ki:.1f}  ref={signal}\n"
-            f"az err={np.degrees(state.az_err):+5.1f} deg   "
-            f"POV fov={state.pov_fov:.0f} deg",
+            f"LOS az err={np.degrees(state.az_err):+5.1f} deg   "
+            f"POV fov={state.pov_fov:.0f} deg\n"
+            f"base disturbance: yaw={np.degrees(state.base_yaw):+5.1f}  "
+            f"pitch={np.degrees(state.base_pitch):+5.1f} deg",
         )
         pl.subplot(0, 1)
-        viz.update_pov_camera(pl, state.turret, fov_deg=state.pov_fov)
+        viz.update_pov_camera(pl, state.turret, state.base_yaw, state.base_pitch,
+                              fov_deg=state.pov_fov)
         pl.render()
 
-    _add_widgets(pl, state.params)
+    _add_widgets(pl, state)
     _add_keyboard_controls(pl, state)
 
     return pl, state, tick
