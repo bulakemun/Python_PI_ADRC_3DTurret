@@ -11,3 +11,6 @@ wheels/
 
 # macOS
 .DS_Store
+
+# Downloaded scenery assets (fetched on first run by simulation/assets.py)
+assets/

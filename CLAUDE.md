@@ -26,7 +26,9 @@ Python_3DTurret/
 ├── simulation/
 │   ├── turret_model.py          # Turret plant model (static base, 2-axis gimbal)
 │   ├── target_board.py          # Static target board geometry/position (400 m)
-│   └── visualization.py         # PyVista 3D world view + turret POV camera
+│   ├── assets.py                # Downloads/caches scenery textures + mountain mesh
+│   └── visualization.py         # PyVista 3D world view + turret POV camera + scenery
+├── assets/                      # Downloaded scenery (gitignored; fetched on first run)
 ├── pyproject.toml               # uv-managed project + dependencies
 └── main.py                      # uv init default entry (unused; app.py is the real entry point)
 ```
@@ -44,7 +46,14 @@ uv run python app.py
 
 In-window controls: sliders tune Kp/Ki/amplitude/frequency and a checkbox
 toggles square/sine. Keyboard moves the cameras — arrows orbit the world view,
-`z`/`x` zoom it, `c` resets it, and `[`/`]` zoom the turret POV.
+`z`/`x` zoom it, `c` resets it, and `[`/`]` zoom the turret POV. The world-view
+orbit is roll-free (yaw/pitch only), for both keyboard and mouse (terrain style).
+
+Scenery (ground grass texture, tree bark, and a distant mountain elevation
+mesh) is downloaded on first run by `simulation/assets.py` — grass/bark from
+Poly Haven (CC0) and the Mount St. Helens DEM via `pyvista.examples` — cached
+under `assets/`. If a download fails (offline), the scene falls back to flat
+colours and still runs.
 
 ## Tech stack
 

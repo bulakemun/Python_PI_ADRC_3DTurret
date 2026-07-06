@@ -30,6 +30,7 @@ from control.reference_signals import square_wave, sine_wave
 from simulation.turret_model import TurretModel
 from simulation.target_board import TargetBoard
 from simulation import visualization as viz
+from simulation import assets as assets_mod
 
 # Wall-clock pacing: advance this many plant steps per rendered frame so the
 # animation runs at roughly real time (FRAME_INTERVAL_MS * SUBSTEPS ~= dt*1000).
@@ -148,6 +149,54 @@ def _style_slider(widget) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Roll-free orbit camera (pitch + yaw only).
+# --------------------------------------------------------------------------- #
+class _OrbitController:
+    """Orbits a renderer's camera around a fixed focal point using spherical
+    angles with the view-up pinned to world +z, so the camera never rolls -- it
+    only yaws (azimuth) and pitches (elevation)."""
+
+    def __init__(self, renderer, focal,
+                 el_range=(np.radians(3.0), np.radians(85.0)),
+                 dist_range=(4.0, 160.0)):
+        self.r = renderer
+        self.focal = np.asarray(focal, dtype=float)
+        self.el_range = el_range
+        self.dist_range = dist_range
+        cam = renderer.GetActiveCamera()
+        v = np.asarray(cam.GetPosition(), dtype=float) - self.focal
+        self.dist = float(np.linalg.norm(v)) or 16.0
+        self.az = float(np.arctan2(v[1], v[0]))
+        self.el = float(np.arcsin(np.clip(v[2] / self.dist, -1.0, 1.0)))
+        self._home = (self.az, self.el, self.dist)
+        self.apply()
+
+    def apply(self):
+        el, az, d = self.el, self.az, self.dist
+        offset = d * np.array(
+            [np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)]
+        )
+        cam = self.r.GetActiveCamera()
+        cam.SetPosition(*(self.focal + offset))
+        cam.SetFocalPoint(*self.focal)
+        cam.SetViewUp(0.0, 0.0, 1.0)  # world up -> no roll
+        self.r.ResetCameraClippingRange()
+
+    def orbit(self, d_az=0.0, d_el=0.0):
+        self.az += d_az
+        self.el = float(np.clip(self.el + d_el, *self.el_range))
+        self.apply()
+
+    def zoom(self, factor):
+        self.dist = float(np.clip(self.dist / factor, *self.dist_range))
+        self.apply()
+
+    def reset(self):
+        self.az, self.el, self.dist = self._home
+        self.apply()
+
+
+# --------------------------------------------------------------------------- #
 # Widgets, overlays, keyboard.
 # --------------------------------------------------------------------------- #
 def _add_widgets(pl, params: LoopParams) -> None:
@@ -185,56 +234,37 @@ def _add_widgets(pl, params: LoopParams) -> None:
 
 
 def _add_keyboard_controls(pl, state: SimState) -> None:
-    """Bind keys to move the world camera and zoom the POV camera."""
+    """Bind keys to move the world camera (roll-free yaw/pitch) and zoom the POV.
+    Also switch the mouse interactor to terrain style, which keeps the view-up
+    fixed so dragging the world view never rolls the camera."""
     world = pl.renderers[0]
-    initial = None  # captured lazily so it reflects the built-in view
+    orbit_cam = _OrbitController(world, (0.0, 0.0, viz.PIVOT_HEIGHT))
+    d = np.radians(ORBIT_DEG)
 
-    def _remember():
-        nonlocal initial
-        cam = world.GetActiveCamera()
-        initial = (cam.GetPosition(), cam.GetFocalPoint(), cam.GetViewUp())
-
-    _remember()
-
-    def orbit(d_az=0.0, d_el=0.0):
-        cam = world.GetActiveCamera()
-        if d_az:
-            cam.Azimuth(d_az)
-        if d_el:
-            cam.Elevation(d_el)
-            cam.OrthogonalizeViewUp()
-        world.ResetCameraClippingRange()
-        pl.render()
-
-    def zoom(factor):
-        world.GetActiveCamera().Zoom(factor)
-        world.ResetCameraClippingRange()
-        pl.render()
-
-    def reset_view():
-        cam = world.GetActiveCamera()
-        pos, focal, up = initial
-        cam.SetPosition(pos)
-        cam.SetFocalPoint(focal)
-        cam.SetViewUp(up)
-        world.ResetCameraClippingRange()
+    def step(fn):
+        fn()
         pl.render()
 
     def pov_zoom(delta):
         state.pov_fov = float(np.clip(state.pov_fov + delta, *POV_FOV_RANGE))
         pl.render()
 
-    pl.add_key_event("Left", lambda: orbit(d_az=+ORBIT_DEG))
-    pl.add_key_event("Right", lambda: orbit(d_az=-ORBIT_DEG))
-    pl.add_key_event("Up", lambda: orbit(d_el=+ORBIT_DEG))
-    pl.add_key_event("Down", lambda: orbit(d_el=-ORBIT_DEG))
-    pl.add_key_event("z", lambda: zoom(ZOOM_FACTOR))
-    pl.add_key_event("x", lambda: zoom(1.0 / ZOOM_FACTOR))
-    pl.add_key_event("plus", lambda: zoom(ZOOM_FACTOR))
-    pl.add_key_event("minus", lambda: zoom(1.0 / ZOOM_FACTOR))
-    pl.add_key_event("c", reset_view)
+    pl.add_key_event("Left", lambda: step(lambda: orbit_cam.orbit(d_az=+d)))
+    pl.add_key_event("Right", lambda: step(lambda: orbit_cam.orbit(d_az=-d)))
+    pl.add_key_event("Up", lambda: step(lambda: orbit_cam.orbit(d_el=+d)))
+    pl.add_key_event("Down", lambda: step(lambda: orbit_cam.orbit(d_el=-d)))
+    pl.add_key_event("z", lambda: step(lambda: orbit_cam.zoom(ZOOM_FACTOR)))
+    pl.add_key_event("x", lambda: step(lambda: orbit_cam.zoom(1.0 / ZOOM_FACTOR)))
+    pl.add_key_event("plus", lambda: step(lambda: orbit_cam.zoom(ZOOM_FACTOR)))
+    pl.add_key_event("minus", lambda: step(lambda: orbit_cam.zoom(1.0 / ZOOM_FACTOR)))
+    pl.add_key_event("c", lambda: step(orbit_cam.reset))
     pl.add_key_event("bracketright", lambda: pov_zoom(-POV_FOV_STEP))  # ] zoom in
     pl.add_key_event("bracketleft", lambda: pov_zoom(+POV_FOV_STEP))   # [ zoom out
+
+    try:  # roll-free mouse navigation for the world view
+        pl.enable_terrain_style(mouse_wheel_zooms=True)
+    except Exception:  # pragma: no cover - backend dependent
+        pass
 
 
 def _add_overlays(pl, hud_text: str = "") -> object:
@@ -272,13 +302,14 @@ def build_plotter(off_screen: bool = False):
     can call it directly.
     """
     state = _build_state()
+    scenery = viz.build_environment(assets_mod.ensure_assets())
     pl = pv.Plotter(shape=(1, 2), window_size=(1500, 760), off_screen=off_screen)
 
     pl.subplot(0, 0)
-    scene = viz.build_world_view(pl, state.turret, state.board)
+    scene = viz.build_world_view(pl, state.turret, state.board, scenery)
 
     pl.subplot(0, 1)
-    viz.build_pov_view(pl, state.turret, state.board)
+    viz.build_pov_view(pl, state.turret, state.board, scenery)
 
     hud = _add_overlays(pl)
 
