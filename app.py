@@ -303,7 +303,7 @@ def build_plotter(off_screen: bool = False):
     """
     state = _build_state()
     scenery = viz.build_environment(assets_mod.ensure_assets())
-    pl = pv.Plotter(shape=(1, 2), window_size=(1500, 760), off_screen=off_screen)
+    pl = pv.Plotter(shape=(1, 2), window_size=(1920, 1080), off_screen=off_screen)
 
     pl.subplot(0, 0)
     scene = viz.build_world_view(pl, state.turret, state.board, scenery)

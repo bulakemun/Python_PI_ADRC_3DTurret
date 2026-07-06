@@ -171,13 +171,26 @@ def _make_mountains(assets: Dict[str, Optional[str]]) -> List[pv.PolyData]:
     return meshes
 
 
-def _make_trees(assets: Dict[str, Optional[str]], count: int = 26, seed: int = 7):
-    """Return (trunk_mesh, foliage_mesh, bark_texture) for scattered conifers."""
+def _make_trees(assets: Dict[str, Optional[str]], count: int = 30, seed: int = 7,
+                clearing_radius: float = 24.0, downrange_wedge_deg: float = 24.0):
+    """Return (trunk_mesh, foliage_mesh, bark_texture) for scattered conifers.
+
+    Trees keep out of a ``clearing_radius`` around the turret (so it stands in a
+    clearing, never behind trees) and out of a wedge along +x (the downrange
+    line of sight), so the POV toward the board stays unobstructed.
+    """
     rng = np.random.default_rng(seed)
     trunks, foliage = [], []
-    for _ in range(count):
-        r = rng.uniform(7.0, 65.0)
+    wedge = np.radians(downrange_wedge_deg)
+    placed = 0
+    while placed < count:
+        r = rng.uniform(clearing_radius, 90.0)
         a = rng.uniform(0.0, 2.0 * np.pi)
+        # Skip the downrange corridor so nearby trees don't block the POV.
+        ang_from_forward = abs((a + np.pi) % (2.0 * np.pi) - np.pi)
+        if ang_from_forward < wedge and r < 140.0:
+            continue
+        placed += 1
         x, y = r * np.cos(a), r * np.sin(a)
         h = rng.uniform(2.6, 4.8)
         trunk_h = h * 0.30
