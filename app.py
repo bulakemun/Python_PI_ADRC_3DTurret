@@ -302,7 +302,7 @@ def build_plotter(off_screen: bool = False):
     can call it directly.
     """
     state = _build_state()
-    scenery = viz.build_environment(assets_mod.ensure_assets())
+    scenery = viz.build_environment(assets_mod.ensure_assets(), state.board)
     pl = pv.Plotter(shape=(1, 2), window_size=(1920, 1080), off_screen=off_screen)
 
     pl.subplot(0, 0)

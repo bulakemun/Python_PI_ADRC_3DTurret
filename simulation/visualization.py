@@ -171,38 +171,62 @@ def _make_mountains(assets: Dict[str, Optional[str]]) -> List[pv.PolyData]:
     return meshes
 
 
-def _make_trees(assets: Dict[str, Optional[str]], count: int = 90, seed: int = 7,
-                clearing_radius: float = 24.0, downrange_wedge_deg: float = 24.0):
+def _add_conifer(trunks: list, foliage: list, x: float, y: float, h: float) -> None:
+    """Append one low-poly conifer's trunk + stacked-cone foliage at (x, y)."""
+    trunk_h = h * 0.30
+    trunks.append(pv.Cylinder(center=(x, y, trunk_h / 2), direction=(0, 0, 1),
+                              radius=h * 0.05, height=trunk_h, resolution=10))
+    layers = 3
+    for k in range(layers):
+        cone_h = h * 0.55 * (1.0 - 0.16 * k)
+        cone_r = h * (0.30 - 0.07 * k)
+        cz = trunk_h + (h - trunk_h) * (k / layers) * 0.9 + cone_h * 0.2
+        foliage.append(pv.Cone(center=(x, y, cz), direction=(0, 0, 1),
+                               height=cone_h, radius=cone_r, resolution=9))
+
+
+def _make_trees(assets: Dict[str, Optional[str]], board, count: int = 90,
+                seed: int = 7, clearing_radius: float = 24.0,
+                downrange_wedge_deg: float = 24.0, target_count: int = 48):
     """Return (trunk_mesh, foliage_mesh, bark_texture) for scattered conifers.
 
-    Trees keep out of a ``clearing_radius`` around the turret (so it stands in a
-    clearing, never behind trees) and out of a wedge along +x (the downrange
-    line of sight), so the POV toward the board stays unobstructed.
+    Two groups:
+      - a ring around the turret (kept out of a ``clearing_radius`` and out of
+        the downrange corridor so the turret and its POV stay clear), and
+      - a cluster around the target board -- to its sides and behind it, but not
+        in the front wedge facing the turret, so it frames the target without
+        blocking the line of sight or covering the board face.
     """
     rng = np.random.default_rng(seed)
     trunks, foliage = [], []
+
+    # Turret-area ring.
     wedge = np.radians(downrange_wedge_deg)
     placed = 0
     while placed < count:
         r = rng.uniform(clearing_radius, 85.0)
         a = rng.uniform(0.0, 2.0 * np.pi)
-        # Skip the downrange corridor so nearby trees don't block the POV.
         ang_from_forward = abs((a + np.pi) % (2.0 * np.pi) - np.pi)
-        if ang_from_forward < wedge and r < 160.0:
+        if ang_from_forward < wedge and r < 160.0:  # keep the corridor clear
             continue
         placed += 1
-        x, y = r * np.cos(a), r * np.sin(a)
-        h = rng.uniform(2.6, 4.8)
-        trunk_h = h * 0.30
-        trunks.append(pv.Cylinder(center=(x, y, trunk_h / 2), direction=(0, 0, 1),
-                                  radius=h * 0.05, height=trunk_h, resolution=10))
-        layers = 3
-        for k in range(layers):
-            cone_h = h * 0.55 * (1.0 - 0.16 * k)
-            cone_r = h * (0.30 - 0.07 * k)
-            cz = trunk_h + (h - trunk_h) * (k / layers) * 0.9 + cone_h * 0.2
-            foliage.append(pv.Cone(center=(x, y, cz), direction=(0, 0, 1),
-                                   height=cone_h, radius=cone_r, resolution=9))
+        _add_conifer(trunks, foliage, r * np.cos(a), r * np.sin(a),
+                     rng.uniform(2.6, 4.8))
+
+    # Target-area cluster: around/behind the board, never in front of it.
+    bx, by = board.position[0], board.position[1]
+    half_w = board.width / 2.0
+    front_wedge = np.radians(58.0)  # measured from the board->turret (-x) bearing
+    placed = 0
+    while placed < target_count:
+        rr = rng.uniform(half_w + 4.0, 75.0)
+        th = rng.uniform(0.0, 2.0 * np.pi)
+        if abs(th - np.pi) < front_wedge:  # facing the turret -> "in front", skip
+            continue
+        placed += 1
+        _add_conifer(trunks, foliage, bx + rr * np.cos(th), by + rr * np.sin(th),
+                     rng.uniform(2.8, 5.2))
+
     trunk_mesh = reduce(lambda p, q: p.merge(q), trunks)
     foliage_mesh = reduce(lambda p, q: p.merge(q), foliage)
     return trunk_mesh, foliage_mesh, _texture(assets.get("bark"))
@@ -222,12 +246,12 @@ def _board_meshes(board):
     return [(outer, _COL_BOARD_OUTER), (mid, _COL_BOARD_MID), (bull, _COL_BOARD_BULL)]
 
 
-def build_environment(assets: Dict[str, Optional[str]]) -> dict:
+def build_environment(assets: Dict[str, Optional[str]], board) -> dict:
     """Pre-build shared scenery so both subplots render identical surroundings."""
     return {
         "assets": assets,
         "mountains": _make_mountains(assets),
-        "trees": _make_trees(assets),
+        "trees": _make_trees(assets, board),
     }
 
 
