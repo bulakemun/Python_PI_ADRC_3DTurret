@@ -171,7 +171,7 @@ def _make_mountains(assets: Dict[str, Optional[str]]) -> List[pv.PolyData]:
     return meshes
 
 
-def _make_trees(assets: Dict[str, Optional[str]], count: int = 30, seed: int = 7,
+def _make_trees(assets: Dict[str, Optional[str]], count: int = 90, seed: int = 7,
                 clearing_radius: float = 24.0, downrange_wedge_deg: float = 24.0):
     """Return (trunk_mesh, foliage_mesh, bark_texture) for scattered conifers.
 
@@ -184,11 +184,11 @@ def _make_trees(assets: Dict[str, Optional[str]], count: int = 30, seed: int = 7
     wedge = np.radians(downrange_wedge_deg)
     placed = 0
     while placed < count:
-        r = rng.uniform(clearing_radius, 90.0)
+        r = rng.uniform(clearing_radius, 85.0)
         a = rng.uniform(0.0, 2.0 * np.pi)
         # Skip the downrange corridor so nearby trees don't block the POV.
         ang_from_forward = abs((a + np.pi) % (2.0 * np.pi) - np.pi)
-        if ang_from_forward < wedge and r < 140.0:
+        if ang_from_forward < wedge and r < 160.0:
             continue
         placed += 1
         x, y = r * np.cos(a), r * np.sin(a)
@@ -290,7 +290,7 @@ def build_world_view(plotter, turret, board, env: dict) -> TurretScene:
     plotter.add_axes()
     plotter.set_background("#20344a", top="#7ea6c9")
     plotter.camera_position = [
-        (10.0, -11.0, 6.5),
+        (13.0, -14.0, 4.6),  # lower, more horizontal so the forest is in view
         (0.0, 0.0, PIVOT_HEIGHT),
         (0.0, 0.0, 1.0),
     ]
