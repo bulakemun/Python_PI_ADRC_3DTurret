@@ -311,6 +311,18 @@ def _make_control_panel(engine: SimEngine):
     # --- Disturbance group ---
     dis = QtWidgets.QGroupBox("Stewart platform disturbance")
     dl = QtWidgets.QVBoxLayout(dis)
+    dist_btn = QtWidgets.QPushButton()
+    dist_btn.setCheckable(True)
+    dist_btn.setChecked(stew.enabled)
+    dist_btn.setMaximumWidth(140)
+
+    def _toggle_dist():
+        stew.enabled = dist_btn.isChecked()
+        dist_btn.setText("Disturbance: ON" if stew.enabled else "Disturbance: OFF")
+
+    dist_btn.toggled.connect(lambda _c: _toggle_dist())
+    _toggle_dist()
+    dl.addWidget(dist_btn)
     dl.addWidget(FloatSlider("Yaw magnitude", 3.0, 15.0, stew.yaw_mag_deg, 0.5,
                              lambda v: setattr(stew, "yaw_mag_deg", v), "deg"))
     dl.addWidget(FloatSlider("Yaw frequency", 0.1, 0.4, stew.yaw_freq_hz, 0.01,

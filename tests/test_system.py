@@ -95,6 +95,9 @@ def test_disturbance():
     zc = np.sum(np.diff(np.sign(yaw)) != 0)
     check("yaw frequency ~0.2 Hz", abs(zc / 2 / 20.0 - 0.2) < 0.02,
           f"freq={zc / 2 / 20.0:.3f}")
+    d.enabled = False
+    check("disabling holds the platform still (preserving magnitudes)",
+          d.yaw(3.3) == 0.0 and d.pitch(3.3) == 0.0 and d.yaw_mag_deg == 10.0)
 
 
 def test_los_composition():
