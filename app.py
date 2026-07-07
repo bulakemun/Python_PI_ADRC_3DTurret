@@ -24,6 +24,7 @@ Run with:
 from __future__ import annotations
 
 import collections
+import csv
 import os
 
 import numpy as np
@@ -54,6 +55,64 @@ _TEXT_BG = (0.04, 0.07, 0.10)
 
 
 # --------------------------------------------------------------------------- #
+# Data recorder (error + control input + disturbance -> CSV).
+# --------------------------------------------------------------------------- #
+class Recorder:
+    """Buffers per-step telemetry while recording and exports it as CSV/text.
+
+    Everything is stored in SI and written in a single magnitude unit family:
+    angles in degrees, rates in degrees/second -- so error, control input and
+    disturbance are directly comparable. Which channels are written is chosen at
+    export time.
+    """
+
+    #: Selectable channels -> the columns they contribute (deg / deg per s).
+    CHANNELS = ("error", "control", "disturbance")
+
+    def __init__(self):
+        self.recording = False
+        self.rows = []  # (t, mode, err_is_rate, err_az, err_el, cmd_az, cmd_el, by, bp) SI
+
+    def start(self):
+        self.rows = []
+        self.recording = True
+
+    def stop(self):
+        self.recording = False
+
+    def record(self, row):
+        if self.recording:
+            self.rows.append(row)
+
+    def save(self, path, channels):
+        """Write the buffer to ``path`` (CSV). ``channels`` selects column groups."""
+        chans = [c for c in self.CHANNELS if c in channels]
+        header = ["time_s", "mode"]
+        if "error" in chans:
+            header += ["error_unit", "az_error", "el_error"]
+        if "control" in chans:
+            header += ["az_control_deg_per_s", "el_control_deg_per_s"]
+        if "disturbance" in chans:
+            header += ["base_yaw_deg", "base_pitch_deg"]
+
+        deg = np.degrees
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(header)
+            for (t, mode, is_rate, e_az, e_el, c_az, c_el, by, bp) in self.rows:
+                out = [f"{t:.4f}", mode]
+                if "error" in chans:
+                    out += ["deg/s" if is_rate else "deg",
+                            f"{deg(e_az):.5f}", f"{deg(e_el):.5f}"]
+                if "control" in chans:
+                    out += [f"{deg(c_az):.5f}", f"{deg(c_el):.5f}"]
+                if "disturbance" in chans:
+                    out += [f"{deg(by):.5f}", f"{deg(bp):.5f}"]
+                w.writerow(out)
+        return len(self.rows)
+
+
+# --------------------------------------------------------------------------- #
 # Simulation engine (GUI-independent, unit-tested).
 # --------------------------------------------------------------------------- #
 class SimEngine:
@@ -67,12 +126,15 @@ class SimEngine:
         pivot = self.turret.base_position + np.array([0.0, 0.0, viz.PIVOT_HEIGHT])
         self.target_az, self.target_el = self.board.required_angles(pivot)
         self.control = ControlSystem(DT, RATE_LIMIT, el_hold=self.target_el)
+        self.recorder = Recorder()
 
         self.t = 0.0
         self.base_yaw = 0.0
         self.base_pitch = 0.0
         self.az_err = 0.0
         self.el_err = 0.0
+        self.az_cmd = 0.0   # last commanded axis rate (control input, rad/s)
+        self.el_cmd = 0.0
         # Rolling error history: (t, az_err, el_err) in SI (rad or rad/s by mode).
         maxlen = int(GRAPH_WINDOW / (DT * SUBSTEPS)) + 5
         self.history = collections.deque(maxlen=maxlen)
@@ -87,6 +149,7 @@ class SimEngine:
         turret, cs = self.turret, self.control
         az_res = el_res = None
         for _ in range(SUBSTEPS):
+            self.stewart.advance(DT)   # ramp the on/off envelope smoothly
             by, bp = self.stewart.angles(self.t)
             los_az, los_el = viz.los_angles(turret.azimuth, turret.elevation, by, bp)
             az_res, el_res = cs.step(
@@ -97,7 +160,12 @@ class SimEngine:
             self.t += DT
             self.base_yaw, self.base_pitch = by, bp
         self.az_err, self.el_err = az_res.error, el_res.error
+        self.az_cmd, self.el_cmd = az_res.rate_cmd, el_res.rate_cmd
         self.history.append((self.t, self.az_err, self.el_err))
+        self.recorder.record((
+            self.t, int(cs.mode), cs.error_is_rate, self.az_err, self.el_err,
+            self.az_cmd, self.el_cmd, self.base_yaw, self.base_pitch,
+        ))
 
 
 # --------------------------------------------------------------------------- #
@@ -125,13 +193,19 @@ class _OrbitController:
         self.focal = np.asarray(focal, dtype=float)
         self.el_range = el_range
         self.dist_range = dist_range
-        cam = renderer.GetActiveCamera()
-        v = np.asarray(cam.GetPosition(), dtype=float) - self.focal
-        self.dist = float(np.linalg.norm(v)) or 16.0
-        self.az = float(np.arctan2(v[1], v[0]))
-        self.el = float(np.arcsin(np.clip(v[2] / self.dist, -1.0, 1.0)))
+        self._read_camera()
         self._home = (self.az, self.el, self.dist)
         self.apply()
+
+    def _read_camera(self):
+        """Derive az/el/dist from the live camera (respects mouse-driven moves)."""
+        cam = self.r.GetActiveCamera()
+        v = np.asarray(cam.GetPosition(), dtype=float) - self.focal
+        d = float(np.linalg.norm(v))
+        if d > 1e-6:
+            self.dist = d
+            self.az = float(np.arctan2(v[1], v[0]))
+            self.el = float(np.arcsin(np.clip(v[2] / d, -1.0, 1.0)))
 
     def apply(self):
         el, az, d = self.el, self.az, self.dist
@@ -145,11 +219,13 @@ class _OrbitController:
         self.r.ResetCameraClippingRange()
 
     def orbit(self, d_az=0.0, d_el=0.0):
+        self._read_camera()   # incorporate any mouse-driven change first
         self.az += d_az
         self.el = float(np.clip(self.el + d_el, *self.el_range))
         self.apply()
 
     def zoom(self, factor):
+        self._read_camera()   # so zooming keeps the current view, not a stale one
         self.dist = float(np.clip(self.dist / factor, *self.dist_range))
         self.apply()
 
@@ -333,6 +409,72 @@ def _make_control_panel(engine: SimEngine):
                              lambda v: setattr(stew, "pitch_freq_hz", v), "Hz"))
     root.addWidget(dis)
 
+    # --- Data logging group ---
+    rec = engine.recorder
+    log = QtWidgets.QGroupBox("Data logging (deg / deg·s⁻¹)")
+    ll = QtWidgets.QVBoxLayout(log)
+    # The "menu" of channels to export.
+    chan_row = QtWidgets.QHBoxLayout()
+    chk_err = QtWidgets.QCheckBox("Error")
+    chk_ctl = QtWidgets.QCheckBox("Control input")
+    chk_dis = QtWidgets.QCheckBox("Disturbance")
+    for c in (chk_err, chk_ctl, chk_dis):
+        c.setChecked(True)
+        chan_row.addWidget(c)
+    ll.addLayout(chan_row)
+
+    btn_row = QtWidgets.QHBoxLayout()
+    rec_btn = QtWidgets.QPushButton("Record")
+    rec_btn.setCheckable(True)
+    save_btn = QtWidgets.QPushButton("Save CSV…")
+    status = QtWidgets.QLabel("idle")
+    btn_row.addWidget(rec_btn)
+    btn_row.addWidget(save_btn)
+    btn_row.addWidget(status, 1)
+    ll.addLayout(btn_row)
+    root.addWidget(log)
+
+    def _toggle_record():
+        if rec_btn.isChecked():
+            rec.start()
+            rec_btn.setText("Recording…")
+        else:
+            rec.stop()
+            rec_btn.setText("Record")
+        _refresh_status()
+
+    def _selected_channels():
+        sel = set()
+        if chk_err.isChecked():
+            sel.add("error")
+        if chk_ctl.isChecked():
+            sel.add("control")
+        if chk_dis.isChecked():
+            sel.add("disturbance")
+        return sel
+
+    def _save():
+        if not rec.rows:
+            status.setText("nothing recorded yet")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            w, "Save telemetry", "turret_log.csv", "CSV / text (*.csv *.txt)")
+        if not path:
+            return
+        n = rec.save(path, _selected_channels())
+        status.setText(f"saved {n} rows → {os.path.basename(path)}")
+
+    def _refresh_status():
+        if rec.recording:
+            status.setText(f"recording… {len(rec.rows)} rows")
+        elif rec.rows:
+            status.setText(f"stopped ({len(rec.rows)} rows)")
+        else:
+            status.setText("idle")
+
+    rec_btn.toggled.connect(lambda _c: _toggle_record())
+    save_btn.clicked.connect(lambda: _save())
+
     # --- Error graph ---
     fig = Figure(figsize=(5, 2.4), tight_layout=True)
     canvas = FigureCanvas(fig)
@@ -363,6 +505,7 @@ def _make_control_panel(engine: SimEngine):
     _apply_mode()
 
     def update_graph():
+        _refresh_status()
         if not engine.history:
             return
         data = np.array(engine.history)

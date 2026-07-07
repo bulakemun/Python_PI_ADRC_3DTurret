@@ -95,9 +95,14 @@ def test_disturbance():
     zc = np.sum(np.diff(np.sign(yaw)) != 0)
     check("yaw frequency ~0.2 Hz", abs(zc / 2 / 20.0 - 0.2) < 0.02,
           f"freq={zc / 2 / 20.0:.3f}")
+    # Toggling off ramps a smooth envelope (no instantaneous jump), then stills.
     d.enabled = False
-    check("disabling holds the platform still (preserving magnitudes)",
-          d.yaw(3.3) == 0.0 and d.pitch(3.3) == 0.0 and d.yaw_mag_deg == 10.0)
+    d.advance(0.01)
+    check("disable ramps smoothly (not an instant jump to 0)", abs(d.yaw(3.3)) > 0.0)
+    for _ in range(60):                    # 0.6 s > 0.3 s ramp
+        d.advance(0.01)
+    check("disabled platform is still (magnitudes preserved)",
+          abs(d.yaw(3.3)) < 1e-9 and abs(d.pitch(3.3)) < 1e-9 and d.yaw_mag_deg == 10.0)
 
 
 def test_los_composition():
@@ -222,6 +227,54 @@ def test_tree_placement():
           f"min radius={r.min():.2f} m")
 
 
+def test_recorder():
+    print("Data recorder (CSV export)")
+    e = app.SimEngine()
+    e.set_mode(Mode.POSITION)
+    e.recorder.start()
+    for _ in range(20):
+        e.advance()
+    e.recorder.stop()
+    check("recorder buffered rows", len(e.recorder.rows) == 20)
+
+    path = os.path.join(tempfile.gettempdir(), "turret_log_test.csv")
+    n = e.recorder.save(path, {"error", "control", "disturbance"})
+    with open(path) as f:
+        header = f.readline().strip().split(",")
+        first = f.readline().strip().split(",")
+    check("csv wrote all rows", n == 20)
+    check("csv has error/control/disturbance columns in deg units",
+          {"az_error", "az_control_deg_per_s", "base_yaw_deg"} <= set(header)
+          and "deg" in first[2])
+
+    # Channel selection ("menu"): disturbance-only export omits the others.
+    e.recorder.save(path, {"disturbance"})
+    with open(path) as f:
+        hdr2 = f.readline().strip().split(",")
+    check("channel selection limits columns",
+          "base_yaw_deg" in hdr2 and "az_error" not in hdr2)
+
+
+def test_camera_zoom_no_reset():
+    print("Camera zoom does not reset the view")
+    pl = pv.Plotter(off_screen=True)
+    pl.add_mesh(pv.Sphere())
+    r = pl.renderers[0]
+    oc = app._OrbitController(r, (0.0, 0.0, 0.0))
+    # Simulate a mouse-driven move to a known orientation (looking along -y).
+    cam = r.GetActiveCamera()
+    cam.SetFocalPoint(0.0, 0.0, 0.0)
+    cam.SetPosition(0.0, -20.0, 0.0)
+    r.ResetCameraClippingRange()
+    oc.zoom(1.5)                            # keyboard zoom after the mouse move
+    v = np.asarray(cam.GetPosition())
+    az = np.degrees(np.arctan2(v[1], v[0]))
+    check("zoom keeps the current orientation (no snap-back)",
+          abs(az - (-90.0)) < 3.0 and np.linalg.norm(v) < 20.0,
+          f"az={az:.1f} deg, dist={np.linalg.norm(v):.1f}")
+    pl.close()
+
+
 def test_render_smoke():
     print("Headless render smoke")
     pl, scene, engine = app.build_scene(off_screen=True)
@@ -244,7 +297,8 @@ def main():
     for t in (test_pi_controller, test_reference_signals, test_disturbance,
               test_los_composition, test_unit_conversions, test_mode_speed,
               test_mode_position, test_mode_target, test_disturbance_rejection,
-              test_tree_placement, test_render_smoke):
+              test_recorder, test_camera_zoom_no_reset, test_tree_placement,
+              test_render_smoke):
         t()
     print(f"\n{_PASS} passed, {_FAIL} failed")
     sys.exit(1 if _FAIL else 0)

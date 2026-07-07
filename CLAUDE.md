@@ -57,10 +57,12 @@ uv run python app.py
 
 Two windows open: the main 3D window (world view + turret POV, decluttered) and a
 secondary Qt control panel with the mode switch, all control + disturbance sliders,
-and a live error-signal graph (position error in deg, or speed error in deg/s,
-adapting to the mode). They are bridged without embedding VTK in Qt: the VTK
+a live error-signal graph (position error in deg, or speed error in deg/s, adapting
+to the mode), and a data-logging group (channel checkboxes + Record/Save-CSV) that
+exports error, control input and disturbance to a CSV — all in one magnitude unit
+family (deg / deg·s⁻¹). They are bridged without embedding VTK in Qt: the VTK
 animation timer steps the sim, updates the graph, and pumps the Qt event loop via
-`processEvents` (see `app.SimEngine` / `_make_control_panel`).
+`processEvents` (see `app.SimEngine` / `app.Recorder` / `_make_control_panel`).
 
 Keyboard moves the cameras — arrows orbit the world view, `z`/`x` zoom it, `c`
 resets it, and `[`/`]` zoom the turret POV. The world-view orbit is roll-free

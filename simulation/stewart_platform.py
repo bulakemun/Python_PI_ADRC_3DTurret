@@ -29,6 +29,7 @@ class StewartDisturbance:
         pitch_freq_hz: float = 0.25,
         pitch_phase: float = np.pi / 2.0,
         enabled: bool = True,
+        ramp_time: float = 0.3,
     ) -> None:
         # Kept in degrees / Hz so the GUI sliders write straight to these.
         self.yaw_mag_deg = yaw_mag_deg
@@ -36,20 +37,31 @@ class StewartDisturbance:
         self.pitch_mag_deg = pitch_mag_deg
         self.pitch_freq_hz = pitch_freq_hz
         self.pitch_phase = pitch_phase
-        # When disabled the platform holds still; slider magnitudes are preserved.
+        # Toggling ``enabled`` ramps an envelope in/out over ``ramp_time`` seconds
+        # so the platform starts/stops smoothly instead of jumping the base angle
+        # (which would jerk the turret). Slider magnitudes are preserved.
         self.enabled = enabled
+        self.ramp_time = ramp_time
+        self._env = 1.0 if enabled else 0.0
+
+    def advance(self, dt: float) -> None:
+        """Advance the on/off envelope toward the current ``enabled`` state."""
+        target = 1.0 if self.enabled else 0.0
+        step = dt / self.ramp_time if self.ramp_time > 0 else 1.0
+        if self._env < target:
+            self._env = min(target, self._env + step)
+        elif self._env > target:
+            self._env = max(target, self._env - step)
 
     def yaw(self, t: float) -> float:
-        """Base yaw disturbance at time ``t`` (radians)."""
-        if not self.enabled:
-            return 0.0
-        return np.radians(self.yaw_mag_deg) * np.sin(2.0 * np.pi * self.yaw_freq_hz * t)
+        """Base yaw disturbance at time ``t`` (radians), scaled by the envelope."""
+        return self._env * np.radians(self.yaw_mag_deg) * np.sin(
+            2.0 * np.pi * self.yaw_freq_hz * t
+        )
 
     def pitch(self, t: float) -> float:
-        """Base pitch disturbance at time ``t`` (radians)."""
-        if not self.enabled:
-            return 0.0
-        return np.radians(self.pitch_mag_deg) * np.sin(
+        """Base pitch disturbance at time ``t`` (radians), scaled by the envelope."""
+        return self._env * np.radians(self.pitch_mag_deg) * np.sin(
             2.0 * np.pi * self.pitch_freq_hz * t + self.pitch_phase
         )
 
