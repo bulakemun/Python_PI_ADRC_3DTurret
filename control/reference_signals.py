@@ -48,8 +48,19 @@ def sine_wave(t, amplitude=1.0, frequency=1.0, phase=0.0, offset=0.0):
     return amplitude * np.sin(2.0 * np.pi * frequency * t + phase) + offset
 
 
+def constant_wave(t, amplitude=1.0, frequency=1.0, offset=0.0):
+    """Constant reference at ``amplitude + offset`` (a step / DC setpoint).
+
+    ``frequency`` is accepted and ignored so this shares the generators'
+    signature and can be selected interchangeably in the UI.
+    """
+    t = np.asarray(t, dtype=float)
+    return np.full(t.shape, amplitude + offset) if t.ndim else amplitude + offset
+
+
 #: Registry so the UI can offer signals by name and stay open to extension.
 REFERENCE_SIGNALS = {
     "square": square_wave,
     "sine": sine_wave,
+    "constant": constant_wave,
 }

@@ -9,4 +9,5 @@ dependencies = [
     "scipy>=1.11",
     "matplotlib>=3.8",
     "pyvista>=0.48.4",
+    "pyside6>=6.11.1",
 ]

@@ -1,18 +1,21 @@
 """
-Entry point for the 3D Turret Simulation (PyVista / VTK).
+Entry point for the 3D Turret Simulation.
 
-Opens an interactive window with two live 3D views -- a world view of the
-turret model and a turret-POV camera -- with in-window sliders to tune the
-control loop and keyboard controls to move the cameras. This is the only
-module that wires ``control`` and ``simulation`` together; it keeps the logic
-thin.
+Two windows:
+  * Main 3D window (PyVista/VTK): the decluttered world view + turret POV, with
+    keyboard camera controls and a status HUD. No control sliders here.
+  * Secondary control window (Qt/PySide6): the mode switch and every control /
+    disturbance slider, plus a live error-signal graph.
 
-Per-axis loop (see CLAUDE.md):  error = reference - angle -> PI -> commanded
-rate -> the turret integrates the rate. The reference signal drives azimuth;
-elevation holds the angle that points at the board centre.
+The two are bridged without embedding VTK in Qt (which needs a real GL surface):
+the VTK animation timer steps the simulation, refreshes the 3D scene, updates
+the Qt graph, and pumps the Qt event loop via ``processEvents`` so the control
+window stays responsive.
 
-Keyboard (world view):  arrows = orbit, z / x = zoom, c = reset view.
-Keyboard (turret POV):   [ / ] = zoom out / in.
+Control (see control/control_system.py): an outer position loop (P, Kp 1-20)
+wraps the inner speed loop (PI). Modes: 1 SPEED (speed reference), 2 POSITION
+(degree reference, incl. constant), 3 TARGET (auto-aim at the board). All loops
+regulate the line of sight (Stewart-platform base disturbance + gimbal).
 
 Run with:
     uv run python app.py
@@ -20,122 +23,87 @@ Run with:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import collections
+import os
 
 import numpy as np
 import pyvista as pv
 
-from control.pi_controller import PIController
-from control.reference_signals import square_wave, sine_wave
+from control.control_system import ControlSystem, Mode
 from simulation.turret_model import TurretModel
 from simulation.target_board import TargetBoard
 from simulation.stewart_platform import StewartDisturbance
 from simulation import visualization as viz
 from simulation import assets as assets_mod
 
-# Wall-clock pacing: advance this many plant steps per rendered frame so the
-# animation runs at roughly real time (FRAME_INTERVAL_MS * SUBSTEPS ~= dt*1000).
+# Simulation pacing.
 DT = 0.01
 SUBSTEPS = 3
 FRAME_INTERVAL_MS = 30
-RATE_LIMIT = np.radians(90.0)
+RATE_LIMIT = np.radians(180.0)          # plant rate command / speed-ref clamp
 
-# Keyboard camera-control increments.
+# Camera-control increments.
 ORBIT_DEG = 4.0
 ZOOM_FACTOR = 1.1
 POV_FOV_STEP = 4.0
 POV_FOV_RANGE = (12.0, 70.0)
 
-# Shared UI palette.
+# Error-graph rolling window (seconds).
+GRAPH_WINDOW = 12.0
 _TEXT_BG = (0.04, 0.07, 0.10)
 
 
-@dataclass
-class LoopParams:
-    """Live-tunable parameters, mutated by the slider/checkbox callbacks."""
+# --------------------------------------------------------------------------- #
+# Simulation engine (GUI-independent, unit-tested).
+# --------------------------------------------------------------------------- #
+class SimEngine:
+    """Owns the plant, disturbance and cascade controller, and steps the loop."""
 
-    kp: float = 6.0
-    ki: float = 2.0
-    amplitude: float = np.radians(15.0)  # azimuth reference amplitude (rad)
-    frequency: float = 0.3               # Hz
-    use_sine: bool = False               # False -> square wave
+    def __init__(self):
+        self.turret = TurretModel(dt=DT, tau=0.2, rate_limit=RATE_LIMIT)
+        self.board = TargetBoard(height_m=14.0, width=30.0, height_dim=24.0)
+        self.stewart = StewartDisturbance()
 
+        pivot = self.turret.base_position + np.array([0.0, 0.0, viz.PIVOT_HEIGHT])
+        self.target_az, self.target_el = self.board.required_angles(pivot)
+        self.control = ControlSystem(DT, RATE_LIMIT, el_hold=self.target_el)
 
-@dataclass
-class SimState:
-    """Everything that persists across animation frames."""
+        self.t = 0.0
+        self.base_yaw = 0.0
+        self.base_pitch = 0.0
+        self.az_err = 0.0
+        self.el_err = 0.0
+        # Rolling error history: (t, az_err, el_err) in SI (rad or rad/s by mode).
+        maxlen = int(GRAPH_WINDOW / (DT * SUBSTEPS)) + 5
+        self.history = collections.deque(maxlen=maxlen)
 
-    turret: TurretModel
-    board: TargetBoard
-    az_ctrl: PIController
-    el_ctrl: PIController
-    params: LoopParams
-    stewart: StewartDisturbance
-    el_setpoint: float
-    pov_fov: float = 40.0
-    t: float = 0.0
-    az_ref: float = 0.0
-    az_err: float = 0.0
-    base_yaw: float = 0.0
-    base_pitch: float = 0.0
+    def set_mode(self, mode: Mode) -> None:
+        self.control.mode = mode
+        self.control.reset()
+        self.history.clear()
 
-
-def _reference(params: LoopParams, t: float) -> float:
-    """Current azimuth reference (rad) for the selected signal."""
-    if params.use_sine:
-        return float(sine_wave(t, params.amplitude, params.frequency))
-    return float(square_wave(t, params.amplitude, params.frequency))
-
-
-def _advance(state: SimState) -> None:
-    """Step the closed loop by SUBSTEPS plant steps.
-
-    The Stewart platform disturbs the base (yaw/pitch), so the controller
-    regulates the *line of sight* (base + gimbal), stabilising the pointing
-    against the disturbance rather than just the gimbal angle.
-    """
-    p = state.params
-    state.az_ctrl.kp = state.el_ctrl.kp = p.kp
-    state.az_ctrl.ki = state.el_ctrl.ki = p.ki
-    az_err = state.az_err
-    turret = state.turret
-    for _ in range(SUBSTEPS):
-        by, bp = state.stewart.angles(state.t)
-        los_az, los_el = viz.los_angles(turret.azimuth, turret.elevation, by, bp)
-        state.az_ref = _reference(p, state.t)
-        az_err = state.az_ref - los_az
-        el_err = state.el_setpoint - los_el
-        turret.step(state.az_ctrl.step(az_err), state.el_ctrl.step(el_err))
-        state.t += DT
-        state.base_yaw, state.base_pitch = by, bp
-    state.az_err = az_err
-
-
-def _build_state() -> SimState:
-    board = TargetBoard(height_m=14.0, width=30.0, height_dim=24.0)
-    turret = TurretModel(dt=DT, tau=0.2, rate_limit=RATE_LIMIT)
-    params = LoopParams()
-    limits = (-RATE_LIMIT, RATE_LIMIT)
-    # Elevation setpoint that points the line of sight at the board centre.
-    pivot = turret.base_position + np.array([0.0, 0.0, viz.PIVOT_HEIGHT])
-    _, el_setpoint = board.required_angles(pivot)
-    return SimState(
-        turret=turret,
-        board=board,
-        az_ctrl=PIController(params.kp, params.ki, DT, output_limits=limits),
-        el_ctrl=PIController(params.kp, params.ki, DT, output_limits=limits),
-        params=params,
-        stewart=StewartDisturbance(),
-        el_setpoint=el_setpoint,
-    )
+    def advance(self) -> None:
+        """Step the closed loop by SUBSTEPS plant steps."""
+        turret, cs = self.turret, self.control
+        az_res = el_res = None
+        for _ in range(SUBSTEPS):
+            by, bp = self.stewart.angles(self.t)
+            los_az, los_el = viz.los_angles(turret.azimuth, turret.elevation, by, bp)
+            az_res, el_res = cs.step(
+                self.t, los_az, turret.azimuth_rate, los_el, turret.elevation_rate,
+                self.target_az, self.target_el,
+            )
+            turret.step(az_res.rate_cmd, el_res.rate_cmd)
+            self.t += DT
+            self.base_yaw, self.base_pitch = by, bp
+        self.az_err, self.el_err = az_res.error, el_res.error
+        self.history.append((self.t, self.az_err, self.el_err))
 
 
 # --------------------------------------------------------------------------- #
-# Text / widget styling helpers (legibility + opacity).
+# Text / overlay styling.
 # --------------------------------------------------------------------------- #
 def _style_text_prop(tp, bg_opacity: float = 0.55) -> None:
-    """Make a VTK text property legible over the 3D scene: bold white with a
-    shadow and a translucent dark background box."""
     tp.SetColor(1.0, 1.0, 1.0)
     tp.SetBold(True)
     tp.SetShadow(True)
@@ -144,33 +112,11 @@ def _style_text_prop(tp, bg_opacity: float = 0.55) -> None:
     tp.SetBackgroundOpacity(bg_opacity)
 
 
-def _style_slider(widget) -> None:
-    """Enlarge and colour a slider so it reads clearly against the scene."""
-    rep = widget.GetRepresentation()
-    rep.SetTitleHeight(0.026)
-    rep.SetLabelHeight(0.023)
-    rep.SetTubeWidth(0.007)
-    rep.SetSliderWidth(0.030)
-    rep.SetSliderLength(0.022)
-    rep.SetEndCapWidth(0.030)
-    rep.SetEndCapLength(0.008)
-    rep.GetTubeProperty().SetColor(0.55, 0.60, 0.66)
-    rep.GetTubeProperty().SetOpacity(0.75)
-    rep.GetSliderProperty().SetColor(0.16, 0.72, 0.92)   # handle
-    rep.GetSelectedProperty().SetColor(0.22, 0.90, 0.55)
-    rep.GetCapProperty().SetColor(0.80, 0.83, 0.88)
-    rep.GetCapProperty().SetOpacity(0.85)
-    _style_text_prop(rep.GetTitleProperty(), bg_opacity=0.6)
-    _style_text_prop(rep.GetLabelProperty(), bg_opacity=0.6)
-
-
 # --------------------------------------------------------------------------- #
 # Roll-free orbit camera (pitch + yaw only).
 # --------------------------------------------------------------------------- #
 class _OrbitController:
-    """Orbits a renderer's camera around a fixed focal point using spherical
-    angles with the view-up pinned to world +z, so the camera never rolls -- it
-    only yaws (azimuth) and pitches (elevation)."""
+    """Orbits a renderer's camera with the view-up pinned to world +z (no roll)."""
 
     def __init__(self, renderer, focal,
                  el_range=(np.radians(3.0), np.radians(85.0)),
@@ -195,7 +141,7 @@ class _OrbitController:
         cam = self.r.GetActiveCamera()
         cam.SetPosition(*(self.focal + offset))
         cam.SetFocalPoint(*self.focal)
-        cam.SetViewUp(0.0, 0.0, 1.0)  # world up -> no roll
+        cam.SetViewUp(0.0, 0.0, 1.0)
         self.r.ResetCameraClippingRange()
 
     def orbit(self, d_az=0.0, d_el=0.0):
@@ -212,109 +158,19 @@ class _OrbitController:
         self.apply()
 
 
-# --------------------------------------------------------------------------- #
-# Widgets, overlays, keyboard.
-# --------------------------------------------------------------------------- #
-def _add_widgets(pl, state: SimState) -> None:
-    """Attach the styled live-tuning sliders + reference toggle to the world view.
-
-    Two columns: the control loop (Kp/Ki/reference) on the left, and the Stewart
-    platform disturbance (yaw/pitch magnitude + frequency) on the right.
-    """
-    pl.subplot(0, 0)
-    params, stewart = state.params, state.stewart
-
-    def _slider(callback, rng, value, title, x0, x1, y):
-        w = pl.add_slider_widget(
-            callback, rng, value=value, title=title,
-            pointa=(x0, y), pointb=(x1, y), style="modern",
-            title_height=0.024, color="#e6edf3", fmt="%.2f",
-        )
-        _style_slider(w)
-
-    # Left column -- control loop.
-    lx0, lx1 = 0.035, 0.30
-    _slider(lambda v: setattr(params, "kp", v), [0.0, 20.0], params.kp, "Kp",
-            lx0, lx1, 0.90)
-    _slider(lambda v: setattr(params, "ki", v), [0.0, 20.0], params.ki, "Ki",
-            lx0, lx1, 0.78)
-    _slider(lambda v: setattr(params, "amplitude", np.radians(v)),
-            [0.0, 45.0], np.degrees(params.amplitude), "Amplitude (deg)",
-            lx0, lx1, 0.66)
-    _slider(lambda v: setattr(params, "frequency", v),
-            [0.05, 2.0], params.frequency, "Frequency (Hz)", lx0, lx1, 0.54)
-
-    # Right column -- Stewart platform disturbance (magnitude 3-15 deg, freq 0.1-0.4 Hz).
-    rx0, rx1 = 0.37, 0.635
-    _slider(lambda v: setattr(stewart, "yaw_mag_deg", v),
-            [3.0, 15.0], stewart.yaw_mag_deg, "Yaw dist (deg)", rx0, rx1, 0.90)
-    _slider(lambda v: setattr(stewart, "yaw_freq_hz", v),
-            [0.1, 0.4], stewart.yaw_freq_hz, "Yaw freq (Hz)", rx0, rx1, 0.78)
-    _slider(lambda v: setattr(stewart, "pitch_mag_deg", v),
-            [3.0, 15.0], stewart.pitch_mag_deg, "Pitch dist (deg)", rx0, rx1, 0.66)
-    _slider(lambda v: setattr(stewart, "pitch_freq_hz", v),
-            [0.1, 0.4], stewart.pitch_freq_hz, "Pitch freq (Hz)", rx0, rx1, 0.54)
-
-    # Placed under the sliders (well above the lower-left HUD) to avoid overlap.
-    pl.add_checkbox_button_widget(
-        lambda flag: setattr(params, "use_sine", flag),
-        value=params.use_sine, position=(30, 345), size=30,
-        color_on="#27ae60", color_off="#7f8c8d", border_size=2,
-    )
-    label = pl.add_text("Sine (else square)", position=(72, 349),
-                        font_size=10, color="white")
-    _style_text_prop(label.GetTextProperty(), bg_opacity=0.5)
-
-
-def _add_keyboard_controls(pl, state: SimState) -> None:
-    """Bind keys to move the world camera (roll-free yaw/pitch) and zoom the POV.
-    Also switch the mouse interactor to terrain style, which keeps the view-up
-    fixed so dragging the world view never rolls the camera."""
-    world = pl.renderers[0]
-    orbit_cam = _OrbitController(world, (0.0, 0.0, viz.PIVOT_HEIGHT))
-    d = np.radians(ORBIT_DEG)
-
-    def step(fn):
-        fn()
-        pl.render()
-
-    def pov_zoom(delta):
-        state.pov_fov = float(np.clip(state.pov_fov + delta, *POV_FOV_RANGE))
-        pl.render()
-
-    pl.add_key_event("Left", lambda: step(lambda: orbit_cam.orbit(d_az=+d)))
-    pl.add_key_event("Right", lambda: step(lambda: orbit_cam.orbit(d_az=-d)))
-    pl.add_key_event("Up", lambda: step(lambda: orbit_cam.orbit(d_el=+d)))
-    pl.add_key_event("Down", lambda: step(lambda: orbit_cam.orbit(d_el=-d)))
-    pl.add_key_event("z", lambda: step(lambda: orbit_cam.zoom(ZOOM_FACTOR)))
-    pl.add_key_event("x", lambda: step(lambda: orbit_cam.zoom(1.0 / ZOOM_FACTOR)))
-    pl.add_key_event("plus", lambda: step(lambda: orbit_cam.zoom(ZOOM_FACTOR)))
-    pl.add_key_event("minus", lambda: step(lambda: orbit_cam.zoom(1.0 / ZOOM_FACTOR)))
-    pl.add_key_event("c", lambda: step(orbit_cam.reset))
-    pl.add_key_event("bracketright", lambda: pov_zoom(-POV_FOV_STEP))  # ] zoom in
-    pl.add_key_event("bracketleft", lambda: pov_zoom(+POV_FOV_STEP))   # [ zoom out
-
-    try:  # roll-free mouse navigation for the world view
-        pl.enable_terrain_style(mouse_wheel_zooms=True)
-    except Exception:  # pragma: no cover - backend dependent
-        pass
-
-
-def _add_overlays(pl, hud_text: str = "") -> object:
-    """Add view titles, the POV reticle, and the controls legend. Returns the
-    world-view HUD annotation so the animation loop can update it."""
+def _add_overlays(pl):
+    """View titles, POV reticle and controls legend. Returns the HUD annotation."""
     pl.subplot(0, 0)
     title_w = pl.add_text("World view", position="upper_edge", font_size=13,
                           color="white")
     _style_text_prop(title_w.GetTextProperty(), bg_opacity=0.5)
     help_txt = pl.add_text(
-        "arrows: orbit   z / x: zoom   c: reset\n"
-        "[ / ]: POV zoom   q: quit",
+        "arrows: orbit   z / x: zoom   c: reset\n[ / ]: POV zoom   q: quit",
         position="lower_right", font_size=10, color="#dfe6ee",
     )
     _style_text_prop(help_txt.GetTextProperty(), bg_opacity=0.5)
-    hud = pl.add_text(hud_text, position="lower_left", font_size=12,
-                      color="white", name="hud")
+    hud = pl.add_text("", position="lower_left", font_size=12, color="white",
+                      name="hud")
     _style_text_prop(hud.GetTextProperty(), bg_opacity=0.6)
 
     pl.subplot(0, 1)
@@ -327,58 +183,235 @@ def _add_overlays(pl, hud_text: str = "") -> object:
     return hud
 
 
-def build_plotter(off_screen: bool = False):
-    """Assemble the two-view plotter, widgets, overlays, keyboard, and tick.
+def _add_keyboard_controls(pl, engine: SimEngine, pov):
+    """Roll-free world-camera keys + POV zoom; terrain-style mouse."""
+    world = pl.renderers[0]
+    orbit_cam = _OrbitController(world, (0.0, 0.0, viz.PIVOT_HEIGHT))
+    d = np.radians(ORBIT_DEG)
 
-    Returns ``(plotter, state, tick)``. ``tick`` advances the simulation and
-    refreshes both views; ``main`` drives it on a timer, and the headless test
-    can call it directly.
-    """
-    state = _build_state()
-    scenery = viz.build_environment(assets_mod.ensure_assets(), state.board)
-    pl = pv.Plotter(shape=(1, 2), window_size=(1920, 1080), off_screen=off_screen)
+    def step(fn):
+        fn()
+        pl.render()
 
-    pl.subplot(0, 0)
-    scene = viz.build_world_view(pl, state.turret, state.board, scenery)
+    def pov_zoom(delta):
+        pov[0] = float(np.clip(pov[0] + delta, *POV_FOV_RANGE))
+        pl.render()
 
-    pl.subplot(0, 1)
-    viz.build_pov_view(pl, state.turret, state.board, scenery)
-
-    hud = _add_overlays(pl)
+    pl.add_key_event("Left", lambda: step(lambda: orbit_cam.orbit(d_az=+d)))
+    pl.add_key_event("Right", lambda: step(lambda: orbit_cam.orbit(d_az=-d)))
+    pl.add_key_event("Up", lambda: step(lambda: orbit_cam.orbit(d_el=+d)))
+    pl.add_key_event("Down", lambda: step(lambda: orbit_cam.orbit(d_el=-d)))
+    pl.add_key_event("z", lambda: step(lambda: orbit_cam.zoom(ZOOM_FACTOR)))
+    pl.add_key_event("x", lambda: step(lambda: orbit_cam.zoom(1.0 / ZOOM_FACTOR)))
+    pl.add_key_event("plus", lambda: step(lambda: orbit_cam.zoom(ZOOM_FACTOR)))
+    pl.add_key_event("minus", lambda: step(lambda: orbit_cam.zoom(1.0 / ZOOM_FACTOR)))
+    pl.add_key_event("c", lambda: step(orbit_cam.reset))
+    pl.add_key_event("bracketright", lambda: pov_zoom(-POV_FOV_STEP))
+    pl.add_key_event("bracketleft", lambda: pov_zoom(+POV_FOV_STEP))
 
     try:
-        pl.enable_anti_aliasing("fxaa")
+        pl.enable_terrain_style(mouse_wheel_zooms=True)
     except Exception:  # pragma: no cover - backend dependent
         pass
 
-    def tick(*_args) -> None:
-        _advance(state)
+
+def build_scene(off_screen: bool = False):
+    """Build the two-view 3D plotter and scene. Returns (plotter, scene, engine)."""
+    engine = SimEngine()
+    scenery = viz.build_environment(assets_mod.ensure_assets(), engine.board)
+    pl = pv.Plotter(shape=(1, 2), window_size=(1920, 1080), off_screen=off_screen)
+    pl.subplot(0, 0)
+    scene = viz.build_world_view(pl, engine.turret, engine.board, scenery)
+    pl.subplot(0, 1)
+    viz.build_pov_view(pl, engine.turret, engine.board, scenery)
+    try:
+        pl.enable_anti_aliasing("fxaa")
+    except Exception:  # pragma: no cover
+        pass
+    return pl, scene, engine
+
+
+# --------------------------------------------------------------------------- #
+# Qt control panel (secondary window) with the live error graph.
+# --------------------------------------------------------------------------- #
+def _make_control_panel(engine: SimEngine):
+    """Create the Qt control-panel window. Returns (widget, graph_updater)."""
+    os.environ.setdefault("QT_API", "pyside6")
+    from PySide6 import QtWidgets, QtCore
+    import matplotlib
+    matplotlib.use("qtagg")
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_qtagg import FigureCanvas
+
+    cs, stew = engine.control, engine.stewart
+
+    class FloatSlider(QtWidgets.QWidget):
+        def __init__(self, name, lo, hi, val, step, cb, unit=""):
+            super().__init__()
+            self._lo, self._step, self._cb = lo, step, cb
+            self._name, self._unit = name, unit
+            lay = QtWidgets.QHBoxLayout(self)
+            lay.setContentsMargins(2, 1, 2, 1)
+            self._lbl = QtWidgets.QLabel()
+            self._lbl.setMinimumWidth(150)
+            self._s = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            self._s.setMinimum(0)
+            self._s.setMaximum(int(round((hi - lo) / step)))
+            self._s.setValue(int(round((val - lo) / step)))
+            self._s.valueChanged.connect(self._on)
+            lay.addWidget(self._lbl)
+            lay.addWidget(self._s, 1)
+            self._refresh()
+
+        def _val(self):
+            return self._lo + self._s.value() * self._step
+
+        def _on(self, _):
+            self._refresh()
+            self._cb(self._val())
+
+        def _refresh(self):
+            self._lbl.setText(f"{self._name}: {self._val():.2f} {self._unit}")
+
+        def set_unit(self, u):
+            self._unit = u
+            self._refresh()
+
+    w = QtWidgets.QWidget()
+    w.setWindowTitle("Turret Control")
+    w.resize(560, 760)
+    root = QtWidgets.QVBoxLayout(w)
+
+    # --- Mode + signal selectors ---
+    form = QtWidgets.QFormLayout()
+    mode_box = QtWidgets.QComboBox()
+    mode_box.addItems(["1 - Speed loop", "2 - Position reference", "3 - Target tracking"])
+    signal_box = QtWidgets.QComboBox()
+    signal_box.addItems(["square", "sine", "constant"])
+    form.addRow("Mode", mode_box)
+    form.addRow("Reference signal", signal_box)
+    root.addLayout(form)
+
+    # --- Control-loop group ---
+    ctl = QtWidgets.QGroupBox("Control loop")
+    cl = QtWidgets.QVBoxLayout(ctl)
+    amp = FloatSlider("Amplitude", 0.0, 90.0, np.degrees(cs.amplitude_rad), 1.0,
+                      lambda v: setattr(cs, "amplitude_rad", np.radians(v)), "deg/s")
+    cl.addWidget(FloatSlider("Kp (position, outer)", 1.0, 20.0, cs.kp_pos, 0.5,
+                             lambda v: setattr(cs, "kp_pos", v)))
+    cl.addWidget(FloatSlider("Speed Kp (inner)", 0.0, 20.0, cs.kp_speed, 0.1,
+                             lambda v: setattr(cs, "kp_speed", v)))
+    cl.addWidget(FloatSlider("Speed Ki (inner)", 0.0, 20.0, cs.ki_speed, 0.1,
+                             lambda v: setattr(cs, "ki_speed", v)))
+    cl.addWidget(amp)
+    cl.addWidget(FloatSlider("Frequency", 0.05, 2.0, cs.frequency, 0.05,
+                             lambda v: setattr(cs, "frequency", v), "Hz"))
+    root.addWidget(ctl)
+
+    # --- Disturbance group ---
+    dis = QtWidgets.QGroupBox("Stewart platform disturbance")
+    dl = QtWidgets.QVBoxLayout(dis)
+    dl.addWidget(FloatSlider("Yaw magnitude", 3.0, 15.0, stew.yaw_mag_deg, 0.5,
+                             lambda v: setattr(stew, "yaw_mag_deg", v), "deg"))
+    dl.addWidget(FloatSlider("Yaw frequency", 0.1, 0.4, stew.yaw_freq_hz, 0.01,
+                             lambda v: setattr(stew, "yaw_freq_hz", v), "Hz"))
+    dl.addWidget(FloatSlider("Pitch magnitude", 3.0, 15.0, stew.pitch_mag_deg, 0.5,
+                             lambda v: setattr(stew, "pitch_mag_deg", v), "deg"))
+    dl.addWidget(FloatSlider("Pitch frequency", 0.1, 0.4, stew.pitch_freq_hz, 0.01,
+                             lambda v: setattr(stew, "pitch_freq_hz", v), "Hz"))
+    root.addWidget(dis)
+
+    # --- Error graph ---
+    fig = Figure(figsize=(5, 2.4), tight_layout=True)
+    canvas = FigureCanvas(fig)
+    ax = fig.add_subplot(111)
+    (line_az,) = ax.plot([], [], color="tab:blue", label="azimuth")
+    (line_el,) = ax.plot([], [], color="tab:green", label="elevation")
+    ax.axhline(0.0, color="gray", lw=0.6)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize=8)
+    ax.set_xlabel("time (s)")
+    root.addWidget(QtWidgets.QLabel("Error signal"))
+    root.addWidget(canvas, 1)
+
+    def _apply_mode():
+        idx = mode_box.currentIndex()
+        engine.set_mode(Mode(idx + 1))
+        is_speed = engine.control.mode == Mode.SPEED
+        is_target = engine.control.mode == Mode.TARGET
+        amp.set_unit("deg/s" if is_speed else "deg")
+        signal_box.setEnabled(not is_target)   # target derives its own reference
+        amp.setEnabled(not is_target)
+
+    def _apply_signal():
+        cs.signal = signal_box.currentText()
+
+    mode_box.currentIndexChanged.connect(lambda _i: _apply_mode())
+    signal_box.currentIndexChanged.connect(lambda _i: _apply_signal())
+    _apply_mode()
+
+    def update_graph():
+        if not engine.history:
+            return
+        data = np.array(engine.history)
+        t = data[:, 0]
+        rate = engine.control.error_is_rate
+        az = np.degrees(data[:, 1])
+        el = np.degrees(data[:, 2])
+        line_az.set_data(t, az)
+        line_el.set_data(t, el)
+        ax.set_xlim(max(0.0, t[-1] - GRAPH_WINDOW), max(GRAPH_WINDOW, t[-1]))
+        lo = min(az.min(), el.min(), -1.0)
+        hi = max(az.max(), el.max(), 1.0)
+        pad = 0.1 * (hi - lo)
+        ax.set_ylim(lo - pad, hi + pad)
+        ax.set_ylabel("error (deg/s)" if rate else "error (deg)")
+        ax.set_title(f"{'Speed' if rate else 'Position'} error")
+        canvas.draw_idle()
+
+    return w, update_graph
+
+
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    os.environ.setdefault("QT_API", "pyside6")
+    from PySide6 import QtWidgets
+
+    qt_app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    pl, scene, engine = build_scene(off_screen=False)
+    hud = _add_overlays(pl)
+    pov_fov = [40.0]
+    _add_keyboard_controls(pl, engine, pov_fov)
+
+    panel, update_graph = _make_control_panel(engine)
+    panel.show()
+
+    frame = [0]
+
+    def tick(*_args):
+        engine.advance()
         pl.subplot(0, 0)
-        scene.update(state.turret, state.base_yaw, state.base_pitch)
-        signal = "sine" if state.params.use_sine else "square"
+        scene.update(engine.turret, engine.base_yaw, engine.base_pitch)
+        cs = engine.control
+        unit = "deg/s" if cs.error_is_rate else "deg"
         hud.SetText(
             0,
-            f"Kp={state.params.kp:.1f}  Ki={state.params.ki:.1f}  ref={signal}\n"
-            f"LOS az err={np.degrees(state.az_err):+5.1f} deg   "
-            f"POV fov={state.pov_fov:.0f} deg\n"
-            f"base disturbance: yaw={np.degrees(state.base_yaw):+5.1f}  "
-            f"pitch={np.degrees(state.base_pitch):+5.1f} deg",
+            f"mode {int(cs.mode)}: {cs.mode.name}   Kp={cs.kp_pos:.1f}  "
+            f"sKp={cs.kp_speed:.1f}  sKi={cs.ki_speed:.1f}\n"
+            f"az err={np.degrees(engine.az_err):+6.2f} {unit}   POV fov={pov_fov[0]:.0f} deg\n"
+            f"base disturbance: yaw={np.degrees(engine.base_yaw):+5.1f}  "
+            f"pitch={np.degrees(engine.base_pitch):+5.1f} deg",
         )
         pl.subplot(0, 1)
-        viz.update_pov_camera(pl, state.turret, state.base_yaw, state.base_pitch,
-                              fov_deg=state.pov_fov)
+        viz.update_pov_camera(pl, engine.turret, engine.base_yaw, engine.base_pitch,
+                              fov_deg=pov_fov[0])
         pl.render()
+        frame[0] += 1
+        if frame[0] % 3 == 0:          # ~10 fps graph refresh
+            update_graph()
+        qt_app.processEvents()         # keep the control window responsive
 
-    _add_widgets(pl, state)
-    _add_keyboard_controls(pl, state)
-
-    return pl, state, tick
-
-
-def main() -> None:
-    pl, _state, tick = build_plotter()
-    # Drive the animation on a repeating VTK timer (max_steps is effectively
-    # "run for the whole session"; the timer fires every FRAME_INTERVAL_MS).
     pl.add_timer_event(max_steps=10_000_000, duration=FRAME_INTERVAL_MS, callback=tick)
     pl.show(title="3D Turret Simulation")
 

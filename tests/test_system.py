@@ -26,7 +26,8 @@ import pyvista as pv  # noqa: E402
 pv.OFF_SCREEN = True
 
 from control.pi_controller import PIController  # noqa: E402
-from control.reference_signals import square_wave, sine_wave  # noqa: E402
+from control.reference_signals import square_wave, sine_wave, constant_wave  # noqa: E402
+from control.control_system import ControlSystem, Mode  # noqa: E402
 from simulation.stewart_platform import StewartDisturbance  # noqa: E402
 from simulation.target_board import TargetBoard  # noqa: E402
 from simulation import visualization as viz  # noqa: E402
@@ -78,6 +79,8 @@ def test_reference_signals():
     sq = square_wave(t, amplitude=3.0, frequency=0.5)
     check("square is bipolar ±amplitude",
           set(np.round(np.unique(sq), 6)) == {-3.0, 3.0})
+    c = constant_wave(t, amplitude=1.5, frequency=0.5)
+    check("constant is a flat setpoint", np.allclose(c, 1.5))
 
 
 def test_disturbance():
@@ -109,37 +112,86 @@ def test_los_composition():
     check("base tilt is a rotation", np.allclose(r @ r.T, np.eye(3), atol=1e-9))
 
 
-def test_tracking_no_disturbance():
-    print("Tracking (no disturbance)")
-    st = app._build_state()
-    st.params.amplitude = 0.0           # aim straight at the board
-    st.stewart.yaw_mag_deg = 0.0
-    st.stewart.pitch_mag_deg = 0.0
-    for _ in range(800):                # ~24 s
-        app._advance(st)
-    check("LOS settles on target", abs(np.degrees(st.az_err)) < 0.5,
-          f"az err={np.degrees(st.az_err):.3f} deg")
+def _quiet_engine(mode):
+    """A SimEngine with the base disturbance turned off, in the given mode."""
+    e = app.SimEngine()
+    e.stewart.yaw_mag_deg = 0.0
+    e.stewart.pitch_mag_deg = 0.0
+    e.set_mode(mode)
+    return e
+
+
+def test_unit_conversions():
+    print("Unit conversions")
+    cs = ControlSystem(dt=0.01, rate_limit=np.radians(180.0), el_hold=0.0)
+    cs.amplitude_rad = np.radians(45.0)
+    check("amplitude deg->rad", abs(cs.amplitude_rad - 0.7853981) < 1e-6)
+    cs.mode = Mode.SPEED
+    check("speed mode error is a rate", cs.error_is_rate is True)
+    cs.mode = Mode.POSITION
+    check("position mode error is a position", cs.error_is_rate is False)
+    cs.signal = "constant"
+    check("constant reference returns the amplitude",
+          abs(cs.reference(3.7) - np.radians(45.0)) < 1e-9)
+
+
+def test_mode_speed():
+    print("Mode 1 - speed loop")
+    e = _quiet_engine(Mode.SPEED)
+    e.control.signal = "constant"
+    e.control.amplitude_rad = np.radians(30.0)   # 30 deg/s speed reference
+    for _ in range(600):                         # ~18 s
+        e.advance()
+    rate_deg = np.degrees(e.turret.azimuth_rate)
+    check("axis speed tracks the speed reference", abs(rate_deg - 30.0) < 2.0,
+          f"az rate={rate_deg:.2f} deg/s")
+
+
+def test_mode_position():
+    print("Mode 2 - position reference")
+    e = _quiet_engine(Mode.POSITION)
+    e.control.signal = "constant"
+    e.control.amplitude_rad = np.radians(12.0)   # 12 deg position reference
+    for _ in range(800):
+        e.advance()
+    los_az, _ = viz.los_angles(e.turret.azimuth, e.turret.elevation, 0.0, 0.0)
+    check("LOS settles at the position reference",
+          abs(np.degrees(los_az) - 12.0) < 0.5, f"LOS az={np.degrees(los_az):.3f} deg")
+
+
+def test_mode_target():
+    print("Mode 3 - target tracking")
+    e = _quiet_engine(Mode.TARGET)
+    for _ in range(800):
+        e.advance()
+    los_az, los_el = viz.los_angles(e.turret.azimuth, e.turret.elevation, 0.0, 0.0)
+    ok = (abs(los_az - e.target_az) < np.radians(0.5)
+          and abs(los_el - e.target_el) < np.radians(0.5))
+    check("LOS drives barrel/target error to zero", ok,
+          f"az err={np.degrees(los_az - e.target_az):.3f}, "
+          f"el err={np.degrees(los_el - e.target_el):.3f} deg")
 
 
 def test_disturbance_rejection():
-    print("Disturbance rejection")
-    st = app._build_state()
-    st.params.amplitude = 0.0
-    st.params.kp, st.params.ki = 9.0, 3.0
-    st.stewart.yaw_mag_deg, st.stewart.yaw_freq_hz = 10.0, 0.15
-    st.stewart.pitch_mag_deg, st.stewart.pitch_freq_hz = 8.0, 0.2
+    print("Disturbance rejection (position mode)")
+    e = app.SimEngine()
+    e.set_mode(Mode.POSITION)
+    e.control.signal = "constant"
+    e.control.amplitude_rad = 0.0                # hold the board bearing
+    e.control.kp_pos = 12.0
+    e.stewart.yaw_mag_deg, e.stewart.yaw_freq_hz = 10.0, 0.15
+    e.stewart.pitch_mag_deg, e.stewart.pitch_freq_hz = 8.0, 0.2
 
     errs = []
-    n = 900
+    n = 1200
     for k in range(n):
-        app._advance(st)
-        if k > n // 2:                  # measure after settling
-            errs.append(st.az_err)
+        e.advance()
+        if k > n // 2:
+            errs.append(e.az_err)
     closed_rms = float(np.sqrt(np.mean(np.square(errs))))
-    # Open-loop (gimbal frozen) LOS-az error RMS equals the base-yaw RMS.
-    open_rms = np.radians(st.stewart.yaw_mag_deg) / np.sqrt(2.0)
+    open_rms = np.radians(e.stewart.yaw_mag_deg) / np.sqrt(2.0)  # gimbal frozen
     atten = open_rms / max(closed_rms, 1e-9)
-    check("controller attenuates the base disturbance", atten > 2.0,
+    check("cascade attenuates the base disturbance", atten > 2.0,
           f"attenuation x{atten:.2f} (closed_rms={np.degrees(closed_rms):.2f} deg)")
 
 
@@ -169,13 +221,16 @@ def test_tree_placement():
 
 def test_render_smoke():
     print("Headless render smoke")
-    pl, st, tick = app.build_plotter(off_screen=True)
-    st.stewart.yaw_mag_deg = 12.0
-    for _ in range(30):
-        tick()
-    moved = abs(st.base_yaw) > 1e-6 or abs(st.base_pitch) > 1e-6
-    check("simulation advanced under disturbance", st.t > 0 and moved,
-          f"t={st.t:.2f}, base_yaw={np.degrees(st.base_yaw):.2f}")
+    pl, scene, engine = app.build_scene(off_screen=True)
+    engine.set_mode(Mode.TARGET)
+    engine.stewart.yaw_mag_deg = 12.0
+    for _ in range(40):
+        engine.advance()
+        scene.update(engine.turret, engine.base_yaw, engine.base_pitch)
+        viz.update_pov_camera(pl, engine.turret, engine.base_yaw, engine.base_pitch)
+    moved = abs(engine.base_yaw) > 1e-6 or abs(engine.base_pitch) > 1e-6
+    check("simulation advanced under disturbance", engine.t > 0 and moved,
+          f"t={engine.t:.2f}, base_yaw={np.degrees(engine.base_yaw):.2f}")
     shot = os.path.join(tempfile.gettempdir(), "turret_smoke.png")
     pl.screenshot(shot)
     pl.close()
@@ -184,8 +239,9 @@ def test_render_smoke():
 
 def main():
     for t in (test_pi_controller, test_reference_signals, test_disturbance,
-              test_los_composition, test_tracking_no_disturbance,
-              test_disturbance_rejection, test_tree_placement, test_render_smoke):
+              test_los_composition, test_unit_conversions, test_mode_speed,
+              test_mode_position, test_mode_target, test_disturbance_rejection,
+              test_tree_placement, test_render_smoke):
         t()
     print(f"\n{_PASS} passed, {_FAIL} failed")
     sys.exit(1 if _FAIL else 0)

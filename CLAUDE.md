@@ -7,14 +7,19 @@ A simulation of a 2-axis (azimuth/elevation) turret tracking a static target boa
 Current scope:
 - Turret base carries a Stewart-platform disturbance: sinusoidal yaw/pitch base
   motion (magnitude 3-15 deg, frequency 0.1-0.4 Hz) the controller must reject.
-- Speed control loop is a basic PI controller (no feedforward, no advanced control yet).
-  It regulates the line of sight (base disturbance + gimbal), i.e. gyro-style stabilization.
-- Reference signals are square and sine waves, selectable and tunable live via sliders.
+- Cascade control: an inner speed loop (PI) with an outer position loop (P, Kp 1-20)
+  wrapped around it. All loops regulate the line of sight (base + gimbal), gyro-style.
+- Three selectable control modes: 1 SPEED (speed reference, deg/s), 2 POSITION
+  (degree reference incl. a constant setpoint), 3 TARGET (auto-aim: barrel/target
+  position error feeds the position loop).
+- Reference signals are square / sine / constant, tunable live.
 - Line of sight targets a static board 400 m downrange.
-- Visualization is a real-time 3D-rendered (PyVista/VTK) world view plus a turret-mounted camera POV showing the target as the turret tracks it.
+- Visualization is a real-time 3D-rendered (PyVista/VTK) world view plus a turret-mounted camera POV.
+- Controls live in a secondary Qt window (mode switch + all sliders) with a live
+  error-signal graph; the main 3D window is kept uncluttered.
 
 Out of scope for now (future work): base translation, multi-target tracking, sensor
-noise, advanced controllers (PID w/ feedforward, state-space, MPC), realistic ballistics.
+noise, feedforward / state-space / MPC controllers, realistic ballistics.
 
 ## Architecture
 
@@ -22,10 +27,11 @@ The project is split into two concerns: control and simulation, glued together b
 
 ```
 Python_3DTurret/
-├── app.py                       # PyVista entry point (two 3D views, sliders, animation loop)
+├── app.py                       # Entry point: 3D window (PyVista) + Qt control panel; SimEngine
 ├── control/
-│   ├── pi_controller.py         # PI speed controller (per-axis)
-│   └── reference_signals.py     # square_wave(), sine_wave() generators
+│   ├── pi_controller.py         # Discrete PI controller w/ anti-windup (per-axis)
+│   ├── control_system.py        # Cascade controller: outer position P + inner speed PI; modes
+│   └── reference_signals.py     # square_wave(), sine_wave(), constant_wave()
 ├── simulation/
 │   ├── turret_model.py          # Turret plant model (2-axis gimbal, first-order rate)
 │   ├── target_board.py          # Static target board geometry/position (400 m)
@@ -49,15 +55,24 @@ Run the app with:
 uv run python app.py
 ```
 
-In-window controls: a left slider column tunes the loop (Kp/Ki/amplitude/frequency,
-plus a square/sine toggle); a right column tunes the Stewart-platform disturbance
-(yaw/pitch magnitude and frequency). Keyboard moves the cameras — arrows orbit the
-world view, `z`/`x` zoom it, `c` resets it, and `[`/`]` zoom the turret POV. The
-world-view orbit is roll-free (yaw/pitch only), for both keyboard and mouse (terrain
-style).
+Two windows open: the main 3D window (world view + turret POV, decluttered) and a
+secondary Qt control panel with the mode switch, all control + disturbance sliders,
+and a live error-signal graph (position error in deg, or speed error in deg/s,
+adapting to the mode). They are bridged without embedding VTK in Qt: the VTK
+animation timer steps the sim, updates the graph, and pumps the Qt event loop via
+`processEvents` (see `app.SimEngine` / `_make_control_panel`).
 
-Tests: `uv run python tests/test_system.py` (controller, disturbance, LOS
-composition, disturbance rejection, tree placement, headless render).
+Keyboard moves the cameras — arrows orbit the world view, `z`/`x` zoom it, `c`
+resets it, and `[`/`]` zoom the turret POV. The world-view orbit is roll-free
+(yaw/pitch only), for both keyboard and mouse (terrain style).
+
+Units: control code is SI (rad, rad/s); the panel converts slider values in
+deg / deg/s / Hz at the boundary. The outer position gain Kp is unit-agnostic
+(rad/s per rad). See `control/control_system.py`.
+
+Tests: `uv run python tests/test_system.py` (PI + anti-windup, reference signals,
+disturbance, LOS composition, unit conversions, the three control modes,
+disturbance rejection, tree placement, headless render — 25 checks).
 
 Scenery (ground grass texture, tree bark, and a distant mountain elevation
 mesh) is downloaded on first run by `simulation/assets.py` — grass/bark from
@@ -71,7 +86,9 @@ Managed entirely through `uv` — all dependencies live in this project's `pypro
 
 - **numpy** — array math, angle/vector operations.
 - **scipy** — signal processing helpers if needed (e.g. filtering).
-- **pyvista** (VTK) — real-time 3D rendering of the turret world view and turret POV, plus the in-window slider/checkbox widgets (gains, reference type, amplitude, frequency) that tune the loop live.
+- **pyvista** (VTK) — real-time 3D rendering of the world view and turret POV.
+- **pyside6** (Qt) — the secondary control-panel window (mode switch + sliders).
+- **matplotlib** — the live error-signal graph embedded in the control panel.
 
 Environment setup:
 ```
