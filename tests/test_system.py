@@ -275,6 +275,26 @@ def test_camera_zoom_no_reset():
     pl.close()
 
 
+def test_camera_clamped_above_ground():
+    print("Camera cannot look beneath the world plane")
+    pl = pv.Plotter(off_screen=True)
+    pl.add_mesh(pv.Sphere())
+    r = pl.renderers[0]
+    focal = (0.0, 0.0, 1.35)
+    oc = app._OrbitController(r, focal)
+    cam = r.GetActiveCamera()
+    cam.SetFocalPoint(*focal)
+    cam.SetPosition(12.0, 0.0, -6.0)       # below the ground, looking up
+    r.ResetCameraClippingRange()
+    oc.clamp_view()
+    p = np.asarray(cam.GetPosition())
+    v = p - np.asarray(focal)
+    el = np.degrees(np.arcsin(v[2] / np.linalg.norm(v)))
+    check("elevation clamped above the horizon and camera above ground",
+          el >= 3.0 - 0.1 and p[2] > 0.0, f"el={el:.2f} deg, z={p[2]:.2f} m")
+    pl.close()
+
+
 def test_render_smoke():
     print("Headless render smoke")
     pl, scene, engine = app.build_scene(off_screen=True)
@@ -297,7 +317,8 @@ def main():
     for t in (test_pi_controller, test_reference_signals, test_disturbance,
               test_los_composition, test_unit_conversions, test_mode_speed,
               test_mode_position, test_mode_target, test_disturbance_rejection,
-              test_recorder, test_camera_zoom_no_reset, test_tree_placement,
+              test_recorder, test_camera_zoom_no_reset,
+              test_camera_clamped_above_ground, test_tree_placement,
               test_render_smoke):
         t()
     print(f"\n{_PASS} passed, {_FAIL} failed")

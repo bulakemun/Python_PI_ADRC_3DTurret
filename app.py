@@ -233,6 +233,20 @@ class _OrbitController:
         self.az, self.el, self.dist = self._home
         self.apply()
 
+    def clamp_view(self):
+        """Re-read the live camera and pin it above the ground-plane horizon.
+
+        Called every frame so mouse (terrain-style) navigation can't swing the
+        camera below the world plane to look up from underneath. It is a no-op
+        while the view is already within the elevation/distance limits.
+        """
+        self._read_camera()
+        el = float(np.clip(self.el, *self.el_range))
+        dist = float(np.clip(self.dist, *self.dist_range))
+        if el != self.el or dist != self.dist:
+            self.el, self.dist = el, dist
+            self.apply()
+
 
 def _add_overlays(pl):
     """View titles, POV reticle and controls legend. Returns the HUD annotation."""
@@ -289,6 +303,8 @@ def _add_keyboard_controls(pl, engine: SimEngine, pov):
         pl.enable_terrain_style(mouse_wheel_zooms=True)
     except Exception:  # pragma: no cover - backend dependent
         pass
+
+    return orbit_cam
 
 
 def build_scene(off_screen: bool = False):
@@ -537,7 +553,7 @@ def main() -> None:
     pl, scene, engine = build_scene(off_screen=False)
     hud = _add_overlays(pl)
     pov_fov = [40.0]
-    _add_keyboard_controls(pl, engine, pov_fov)
+    orbit_cam = _add_keyboard_controls(pl, engine, pov_fov)
 
     panel, update_graph = _make_control_panel(engine)
     panel.show()
@@ -547,6 +563,7 @@ def main() -> None:
     def tick(*_args):
         engine.advance()
         pl.subplot(0, 0)
+        orbit_cam.clamp_view()   # keep the world camera above the ground plane
         scene.update(engine.turret, engine.base_yaw, engine.base_pitch)
         cs = engine.control
         unit = "deg/s" if cs.error_is_rate else "deg"
