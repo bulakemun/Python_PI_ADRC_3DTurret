@@ -1,0 +1,173 @@
+<svg viewBox="0 0 1300 830" xmlns="http://www.w3.org/2000/svg" font-family="Arial, Helvetica, sans-serif">
+  <rect x="0" y="0" width="1300" height="830" fill="#ffffff"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#333"/>
+    </marker>
+    <marker id="arrowDash" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8a6d3b"/>
+    </marker>
+  </defs>
+
+  <style>
+    .box { fill:#f4f6f8; stroke:#333; stroke-width:1.5; rx:8; }
+    .ctrl { fill:#e6f0fb; stroke:#2f5f8a; }
+    .plant { fill:#eaf7ea; stroke:#2f7a3d; }
+    .dist { fill:#fdeeea; stroke:#a8432f; }
+    .view { fill:#f3edfa; stroke:#6a3f9a; }
+    .future { fill:#fdf7e3; stroke:#8a6d3b; stroke-dasharray:6,4; }
+    .lbl { font-size:15px; font-weight:600; fill:#222; }
+    .sub { font-size:11.5px; fill:#444; }
+    .grp { font-size:13px; font-weight:700; fill:#555; letter-spacing:0.5px; }
+    .sig { stroke:#333; stroke-width:1.6; fill:none; marker-end:url(#arrow); }
+    .sigFuture { stroke:#8a6d3b; stroke-width:1.6; fill:none; stroke-dasharray:5,4; marker-end:url(#arrowDash); }
+    .sumcirc { fill:#fff; stroke:#333; stroke-width:1.4; }
+  </style>
+
+  <text x="20" y="28" font-size="20" font-weight="700" fill="#222">3D Turret Simulation — Block Diagram</text>
+  <text x="20" y="47" font-size="12.5" fill="#666">Solid = implemented today   ·   Dashed gold = planned (ADRC, gain scheduling, sensor noise)</text>
+
+  <!-- ================= Reference / mode ================= -->
+  <text x="30" y="90" class="grp">REFERENCE</text>
+  <rect x="30" y="100" width="210" height="70" class="box ctrl"/>
+  <text x="135" y="128" text-anchor="middle" class="lbl">Reference signals</text>
+  <text x="135" y="146" text-anchor="middle" class="sub">square / sine / constant</text>
+  <text x="135" y="160" text-anchor="middle" class="sub">reference_signals.py</text>
+
+  <rect x="30" y="195" width="210" height="88" class="box ctrl"/>
+  <text x="135" y="221" text-anchor="middle" class="lbl">Mode switch</text>
+  <text x="135" y="239" text-anchor="middle" class="sub">1 SPEED · 2 POSITION</text>
+  <text x="135" y="253" text-anchor="middle" class="sub">3 TARGET</text>
+  <text x="135" y="271" text-anchor="middle" class="sub">control_system.Mode</text>
+
+  <path class="sig" d="M135,170 L135,195"/>
+
+  <!-- ================= Cascade controller ================= -->
+  <text x="270" y="90" class="grp">CASCADE CONTROLLER (per axis)</text>
+  <rect x="270" y="100" width="560" height="165" class="box ctrl" fill-opacity="0.35"/>
+
+  <!-- outer sum -->
+  <circle cx="320" cy="180" r="15" class="sumcirc"/>
+  <text x="320" y="185" text-anchor="middle" font-size="14">Σ</text>
+  <text x="320" y="202" text-anchor="middle" class="sub">−</text>
+
+  <rect x="360" y="150" width="150" height="60" class="box ctrl"/>
+  <text x="435" y="175" text-anchor="middle" class="lbl">Outer position</text>
+  <text x="435" y="191" text-anchor="middle" class="sub">P, Kp = 1–20 [1/s]</text>
+  <text x="435" y="203" text-anchor="middle" class="sub">pi_controller.PIController</text>
+
+  <!-- inner sum -->
+  <circle cx="545" cy="180" r="15" class="sumcirc"/>
+  <text x="545" y="185" text-anchor="middle" font-size="14">Σ</text>
+  <text x="545" y="202" text-anchor="middle" class="sub">−</text>
+
+  <rect x="585" y="150" width="150" height="60" class="box ctrl"/>
+  <text x="660" y="171" text-anchor="middle" class="lbl">Inner speed</text>
+  <text x="660" y="187" text-anchor="middle" class="sub">PI, Kp_s / Ki_s</text>
+  <text x="660" y="200" text-anchor="middle" class="sub">anti-windup</text>
+
+  <path class="sig" d="M240,230 L290,230 L290,180 L305,180"/>
+  <text x="265" y="222" text-anchor="middle" class="sub">position / speed ref</text>
+  <path class="sig" d="M335,180 L360,180"/>
+  <text x="435" y="140" text-anchor="middle" class="sub">→ speed ref</text>
+  <path class="sig" d="M510,180 L530,180"/>
+  <path class="sig" d="M560,180 L585,180"/>
+  <text x="660" y="140" text-anchor="middle" class="sub">→ rate cmd</text>
+
+  <!-- ================= Plant ================= -->
+  <text x="880" y="90" class="grp">SIMULATION PLANT</text>
+  <rect x="880" y="100" width="220" height="70" class="box plant"/>
+  <text x="990" y="128" text-anchor="middle" class="lbl">Turret model</text>
+  <text x="990" y="146" text-anchor="middle" class="sub">2-axis gimbal, 1st-order rate</text>
+  <text x="990" y="160" text-anchor="middle" class="sub">turret_model.TurretModel</text>
+
+  <path class="sig" d="M735,180 L880,180 L880,150"/>
+
+  <!-- ================= Disturbance ================= -->
+  <text x="880" y="205" class="grp">BASE DISTURBANCE</text>
+  <rect x="880" y="215" width="220" height="70" class="box dist"/>
+  <text x="990" y="243" text-anchor="middle" class="lbl">Stewart platform</text>
+  <text x="990" y="261" text-anchor="middle" class="sub">yaw/pitch sine, 3–15°, 0.1–0.4 Hz</text>
+  <text x="990" y="275" text-anchor="middle" class="sub">stewart_platform.StewartDisturbance</text>
+
+  <!-- LOS sum -->
+  <circle cx="1160" cy="200" r="16" class="sumcirc"/>
+  <text x="1160" y="205" text-anchor="middle" font-size="14">Σ</text>
+  <text x="1160" y="223" text-anchor="middle" class="sub">+</text>
+  <path class="sig" d="M1100,150 L1144,190"/>
+  <path class="sig" d="M1100,250 L1144,210"/>
+  <text x="1210" y="185" text-anchor="middle" class="sub" font-weight="700">line of sight</text>
+  <text x="1210" y="199" text-anchor="middle" class="sub">(az, el)</text>
+
+  <!-- feedback LOS back to outer sum -->
+  <path class="sig" d="M1160,216 L1160,330 L320,330 L320,195" />
+  <text x="740" y="345" text-anchor="middle" class="sub">measured line-of-sight (los_angles) → outer-loop feedback</text>
+
+  <!-- ================= Visualization / Qt ================= -->
+  <text x="30" y="410" class="grp">VISUALIZATION &amp; UI</text>
+  <rect x="30" y="420" width="300" height="90" class="box view"/>
+  <text x="180" y="448" text-anchor="middle" class="lbl">PyVista/VTK 3D window</text>
+  <text x="180" y="466" text-anchor="middle" class="sub">world view + turret POV, scenery</text>
+  <text x="180" y="480" text-anchor="middle" class="sub">roll-free camera, HUD</text>
+  <text x="180" y="500" text-anchor="middle" class="sub">visualization.py</text>
+
+  <rect x="360" y="420" width="300" height="90" class="box view"/>
+  <text x="510" y="448" text-anchor="middle" class="lbl">Qt control panel</text>
+  <text x="510" y="466" text-anchor="middle" class="sub">mode + sliders, error graph,</text>
+  <text x="510" y="480" text-anchor="middle" class="sub">CSV recorder (deg / deg·s⁻¹)</text>
+  <text x="510" y="500" text-anchor="middle" class="sub">app._make_control_panel</text>
+
+  <rect x="690" y="420" width="230" height="90" class="box view"/>
+  <text x="805" y="448" text-anchor="middle" class="lbl">SimEngine</text>
+  <text x="805" y="466" text-anchor="middle" class="sub">owns plant + disturbance +</text>
+  <text x="805" y="480" text-anchor="middle" class="sub">controller; steps the loop</text>
+  <text x="805" y="500" text-anchor="middle" class="sub">app.py</text>
+
+  <path class="sig" d="M990,285 L990,465 L920,465"/>
+  <path class="sig" d="M690,462 L660,462"/>
+  <text x="675" y="452" text-anchor="middle" class="sub" font-size="9.5">ticks</text>
+  <path class="sig" d="M690,478 L690,522 L180,522 L180,510"/>
+  <text x="435" y="536" text-anchor="middle" class="sub" font-size="9.5">app.py tick() steps SimEngine, then refreshes both views each frame</text>
+
+  <!-- ================= Future work ================= -->
+  <text x="30" y="560" class="grp" fill="#8a6d3b">FUTURE WORK (planned)</text>
+
+  <rect x="30" y="575" width="230" height="90" class="box future"/>
+  <text x="145" y="603" text-anchor="middle" class="lbl" fill="#6b5423">ADRC</text>
+  <text x="145" y="621" text-anchor="middle" class="sub">ESO-based disturbance</text>
+  <text x="145" y="635" text-anchor="middle" class="sub">estimation + rejection,</text>
+  <text x="145" y="649" text-anchor="middle" class="sub">replacing/augmenting the PI</text>
+
+  <rect x="290" y="575" width="230" height="90" class="box future"/>
+  <text x="405" y="603" text-anchor="middle" class="lbl" fill="#6b5423">Gain scheduling</text>
+  <text x="405" y="621" text-anchor="middle" class="sub">custom scheduling term:</text>
+  <text x="405" y="635" text-anchor="middle" class="sub">gains vary with operating</text>
+  <text x="405" y="649" text-anchor="middle" class="sub">point / error / rate</text>
+
+  <rect x="550" y="575" width="230" height="90" class="box future"/>
+  <text x="665" y="603" text-anchor="middle" class="lbl" fill="#6b5423">Sensor white noise</text>
+  <text x="665" y="621" text-anchor="middle" class="sub">injected on LOS / rate</text>
+  <text x="665" y="635" text-anchor="middle" class="sub">measurement feedback,</text>
+  <text x="665" y="649" text-anchor="middle" class="sub">tunable PSD/σ</text>
+
+  <path class="sigFuture" d="M145,575 L435,270 L360,190"/>
+  <path class="sigFuture" d="M405,575 L435,270 L410,210"/>
+  <path class="sigFuture" d="M665,575 L665,318 L795,318"/>
+  <text x="900" y="700" text-anchor="middle" class="sub" fill="#8a6d3b" font-style="italic">
+    See README "Future work" for details.
+  </text>
+
+  <!-- legend -->
+  <g transform="translate(950,575)">
+    <rect x="0" y="0" width="16" height="16" class="box ctrl"/>
+    <text x="22" y="13" class="sub">control</text>
+    <rect x="0" y="24" width="16" height="16" class="box plant"/>
+    <text x="22" y="37" class="sub">plant</text>
+    <rect x="0" y="48" width="16" height="16" class="box dist"/>
+    <text x="22" y="61" class="sub">disturbance</text>
+    <rect x="0" y="72" width="16" height="16" class="box view"/>
+    <text x="22" y="85" class="sub">viz / UI</text>
+    <rect x="120" y="0" width="16" height="16" class="box future"/>
+    <text x="142" y="13" class="sub">planned</text>
+  </g>
+</svg>
