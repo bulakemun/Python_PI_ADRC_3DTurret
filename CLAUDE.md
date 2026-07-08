@@ -40,8 +40,7 @@ Python_3DTurret/
 │   └── visualization.py         # PyVista 3D world view + turret POV camera + scenery
 ├── assets/                      # Downloaded scenery (gitignored; fetched on first run)
 ├── tests/test_system.py         # System tests (uv run python tests/test_system.py)
-├── pyproject.toml               # uv-managed project + dependencies
-└── main.py                      # uv init default entry (unused; app.py is the real entry point)
+└── pyproject.toml               # uv-managed project + dependencies
 ```
 
 Design intent:
