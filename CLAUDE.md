@@ -40,6 +40,7 @@ Python_3DTurret/
 │   └── visualization.py         # PyVista 3D world view + turret POV camera + scenery
 ├── assets/                      # Downloaded scenery (gitignored; fetched on first run)
 ├── tests/test_system.py         # System tests (uv run python tests/test_system.py)
+├── docs/control_theory.md       # Control-theory derivation + auditor checklist
 └── pyproject.toml               # uv-managed project + dependencies
 ```
 
