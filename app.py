@@ -26,6 +26,7 @@ from __future__ import annotations
 import collections
 import csv
 import os
+import time
 
 import numpy as np
 import pyvista as pv
@@ -85,7 +86,12 @@ class Recorder:
             self.rows.append(row)
 
     def save(self, path, channels):
-        """Write the buffer to ``path`` (CSV). ``channels`` selects column groups."""
+        """Write the buffer to ``path`` (CSV). ``channels`` selects column groups.
+
+        After the data rows, appends a blank row and a ``stddev_1sigma`` footer
+        row with the population standard deviation (ddof=0) of each numeric
+        column, in the same deg / deg*s^-1 units as the data rows.
+        """
         chans = [c for c in self.CHANNELS if c in channels]
         header = ["time_s", "mode"]
         if "error" in chans:
@@ -96,19 +102,40 @@ class Recorder:
             header += ["base_yaw_deg", "base_pitch_deg"]
 
         deg = np.degrees
+        numeric_cols = collections.defaultdict(list)  # header name -> values (deg units)
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(header)
             for (t, mode, is_rate, e_az, e_el, c_az, c_el, by, bp) in self.rows:
                 out = [f"{t:.4f}", mode]
                 if "error" in chans:
-                    out += ["deg/s" if is_rate else "deg",
-                            f"{deg(e_az):.5f}", f"{deg(e_el):.5f}"]
+                    err_unit = "deg/s" if is_rate else "deg"
+                    az_deg, el_deg = deg(e_az), deg(e_el)
+                    out += [err_unit, f"{az_deg:.5f}", f"{el_deg:.5f}"]
+                    numeric_cols["az_error"].append(az_deg)
+                    numeric_cols["el_error"].append(el_deg)
                 if "control" in chans:
-                    out += [f"{deg(c_az):.5f}", f"{deg(c_el):.5f}"]
+                    az_c, el_c = deg(c_az), deg(c_el)
+                    out += [f"{az_c:.5f}", f"{el_c:.5f}"]
+                    numeric_cols["az_control_deg_per_s"].append(az_c)
+                    numeric_cols["el_control_deg_per_s"].append(el_c)
                 if "disturbance" in chans:
-                    out += [f"{deg(by):.5f}", f"{deg(bp):.5f}"]
+                    by_deg, bp_deg = deg(by), deg(bp)
+                    out += [f"{by_deg:.5f}", f"{bp_deg:.5f}"]
+                    numeric_cols["base_yaw_deg"].append(by_deg)
+                    numeric_cols["base_pitch_deg"].append(bp_deg)
                 w.writerow(out)
+
+            w.writerow([])
+            footer = ["" for _ in header]
+            footer[0] = "stddev_1sigma"
+            for i, col in enumerate(header):
+                if col in numeric_cols:
+                    # More decimals than the per-row columns: this is a single
+                    # summary value, so precision cost is negligible and it
+                    # avoids compounding the per-row rounding.
+                    footer[i] = f"{np.std(numeric_cols[col]):.8f}"
+            w.writerow(footer)
         return len(self.rows)
 
 
@@ -139,10 +166,40 @@ class SimEngine:
         maxlen = int(GRAPH_WINDOW / (DT * SUBSTEPS)) + 5
         self.history = collections.deque(maxlen=maxlen)
 
+        # Timed-recording ("Record 30 s -> CSV") state.
+        self._auto_stop_t = None
+        self._auto_save_path = None
+        self._auto_channels = None
+        self.last_save_msg = None
+
     def set_mode(self, mode: Mode) -> None:
         self.control.mode = mode
         self.control.reset()
         self.history.clear()
+
+    def start_timed_recording(self, duration, path, channels) -> None:
+        """Start recording now; auto-stop and auto-save after ``duration`` s."""
+        self.recorder.start()
+        self._auto_stop_t = self.t + duration
+        self._auto_save_path = path
+        self._auto_channels = channels
+        self.last_save_msg = None
+
+    def set_disturbance_enabled(self, on: bool) -> None:
+        """Enable/disable the Stewart-platform base disturbance.
+
+        Disabling folds the current base angle into the gimbal so the line of
+        sight doesn't jump (this matters most in SPEED mode, where there is no
+        position feedback to pull the barrel back: without the fold, the barrel
+        would appear to "recenter" the instant the base disturbance vanishes).
+        """
+        if not on and self.stewart.enabled:
+            by, bp = self.stewart.angles(self.t)
+            self.turret.azimuth += by
+            self.turret.elevation += bp
+            self.stewart._env = 0.0
+            self.base_yaw = self.base_pitch = 0.0
+        self.stewart.enabled = on
 
     def advance(self) -> None:
         """Step the closed loop by SUBSTEPS plant steps."""
@@ -166,6 +223,11 @@ class SimEngine:
             self.t, int(cs.mode), cs.error_is_rate, self.az_err, self.el_err,
             self.az_cmd, self.el_cmd, self.base_yaw, self.base_pitch,
         ))
+        if self._auto_stop_t is not None and self.t >= self._auto_stop_t:
+            self.recorder.stop()
+            n = self.recorder.save(self._auto_save_path, self._auto_channels)
+            self.last_save_msg = f"saved {n} rows -> {os.path.basename(self._auto_save_path)}"
+            self._auto_stop_t = None
 
 
 # --------------------------------------------------------------------------- #
@@ -267,9 +329,12 @@ def _add_overlays(pl):
     title_p = pl.add_text("Turret POV", position="upper_edge", font_size=13,
                           color="white")
     _style_text_prop(title_p.GetTextProperty(), bg_opacity=0.5)
-    reticle = pl.add_text("+", position=(0.487, 0.472), viewport=True,
+    reticle = pl.add_text("+", position=(0.5, 0.5), viewport=True,
                           font_size=26, color="#efe36a")
-    reticle.GetTextProperty().SetBold(True)
+    rtp = reticle.GetTextProperty()
+    rtp.SetBold(True)
+    rtp.SetJustificationToCentered()
+    rtp.SetVerticalJustificationToCentered()
     return hud
 
 
@@ -398,6 +463,11 @@ def _make_control_panel(engine: SimEngine):
     cl.addWidget(amp)
     cl.addWidget(FloatSlider("Frequency", 0.05, 2.0, cs.frequency, 0.05,
                              lambda v: setattr(cs, "frequency", v), "Hz"))
+    show_target_err_chk = QtWidgets.QCheckBox("Show target error (speed mode)")
+    show_target_err_chk.setChecked(cs.speed_shows_target_error)
+    show_target_err_chk.toggled.connect(
+        lambda c: setattr(cs, "speed_shows_target_error", c))
+    cl.addWidget(show_target_err_chk)
     root.addWidget(ctl)
 
     # --- Disturbance group ---
@@ -409,7 +479,7 @@ def _make_control_panel(engine: SimEngine):
     dist_btn.setMaximumWidth(140)
 
     def _toggle_dist():
-        stew.enabled = dist_btn.isChecked()
+        engine.set_disturbance_enabled(dist_btn.isChecked())
         dist_btn.setText("Disturbance: ON" if stew.enabled else "Disturbance: OFF")
 
     dist_btn.toggled.connect(lambda _c: _toggle_dist())
@@ -443,16 +513,19 @@ def _make_control_panel(engine: SimEngine):
     rec_btn = QtWidgets.QPushButton("Record")
     rec_btn.setCheckable(True)
     save_btn = QtWidgets.QPushButton("Save CSV…")
+    quick_rec_btn = QtWidgets.QPushButton("Record 30 s -> CSV")
     status = QtWidgets.QLabel("idle")
     btn_row.addWidget(rec_btn)
     btn_row.addWidget(save_btn)
-    btn_row.addWidget(status, 1)
+    btn_row.addWidget(quick_rec_btn)
     ll.addLayout(btn_row)
+    ll.addWidget(status)
     root.addWidget(log)
 
     def _toggle_record():
         if rec_btn.isChecked():
             rec.start()
+            engine.last_save_msg = None
             rec_btn.setText("Recording…")
         else:
             rec.stop()
@@ -480,8 +553,18 @@ def _make_control_panel(engine: SimEngine):
         n = rec.save(path, _selected_channels())
         status.setText(f"saved {n} rows → {os.path.basename(path)}")
 
+    def _record_30s():
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            f"turret_log_{time.strftime('%Y%m%d_%H%M%S')}.csv",
+        )
+        engine.start_timed_recording(30.0, path, {"error", "control", "disturbance"})
+        status.setText("recording 30 s…")
+
     def _refresh_status():
-        if rec.recording:
+        if engine.last_save_msg:
+            status.setText(engine.last_save_msg)
+        elif rec.recording:
             status.setText(f"recording… {len(rec.rows)} rows")
         elif rec.rows:
             status.setText(f"stopped ({len(rec.rows)} rows)")
@@ -490,6 +573,7 @@ def _make_control_panel(engine: SimEngine):
 
     rec_btn.toggled.connect(lambda _c: _toggle_record())
     save_btn.clicked.connect(lambda: _save())
+    quick_rec_btn.clicked.connect(lambda: _record_30s())
 
     # --- Error graph ---
     fig = Figure(figsize=(5, 2.4), tight_layout=True)
@@ -512,6 +596,7 @@ def _make_control_panel(engine: SimEngine):
         amp.set_unit("deg/s" if is_speed else "deg")
         signal_box.setEnabled(not is_target)   # target derives its own reference
         amp.setEnabled(not is_target)
+        show_target_err_chk.setEnabled(is_speed)
 
     def _apply_signal():
         cs.signal = signal_box.currentText()

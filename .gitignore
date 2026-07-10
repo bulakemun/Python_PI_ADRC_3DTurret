@@ -14,3 +14,6 @@ wheels/
 
 # Downloaded scenery assets (fetched on first run by simulation/assets.py)
 assets/
+
+# Telemetry CSVs written by the "Record 30 s -> CSV" quick-record button
+turret_log_*.csv

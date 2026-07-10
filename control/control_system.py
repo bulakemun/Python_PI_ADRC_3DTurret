@@ -75,6 +75,11 @@ class ControlSystem:
         self.signal = "square"                # square | sine | constant
         self.amplitude_rad = np.radians(15.0)  # deg or deg/s already -> radians
         self.frequency = 0.3                  # Hz
+        # SPEED mode still commands via the speed loop, but this optionally
+        # swaps the *reported* error (graph/CSV) for the target-tracking
+        # position error, for a quick look at aim accuracy without leaving
+        # SPEED mode.
+        self.speed_shows_target_error = False
 
         limits = (-rate_limit, rate_limit)
         speed_limits = (-self.max_speed_ref, self.max_speed_ref)
@@ -103,7 +108,7 @@ class ControlSystem:
     @property
     def error_is_rate(self) -> bool:
         """True when the graphed error is a rate (SPEED mode) vs a position."""
-        return self.mode == Mode.SPEED
+        return self.mode == Mode.SPEED and not self.speed_shows_target_error
 
     def _sync_gains(self) -> None:
         self._az_pos.kp = self._el_pos.kp = self.kp_pos
@@ -145,6 +150,10 @@ class ControlSystem:
             el_err = el_speed_ref - rate_el
             az_cmd = self._az_spd.step(az_err)
             el_cmd = self._el_spd.step(el_err)
+            if self.speed_shows_target_error:
+                az_pos_err = target_az - los_az
+                el_pos_err = target_el - los_el
+                return (AxisResult(az_cmd, az_pos_err), AxisResult(el_cmd, el_pos_err))
             return (AxisResult(az_cmd, az_err), AxisResult(el_cmd, el_err))
 
         # POSITION / TARGET: full cascade on the line-of-sight position.

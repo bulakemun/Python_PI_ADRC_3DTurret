@@ -295,6 +295,136 @@ def test_camera_clamped_above_ground():
     pl.close()
 
 
+def test_disturbance_disable_no_recenter():
+    print("Disturbance disable preserves line of sight (speed mode)")
+    e = app.SimEngine()
+    e.set_mode(Mode.SPEED)
+    e.control.signal = "constant"
+    e.control.amplitude_rad = 0.0        # zero speed ref -> gimbal holds still
+    e.turret.azimuth = 0.2                # nonzero so a "recenter" would be visible
+    e.stewart.enabled = True
+    e.stewart._env = 1.0                  # skip the ramp-in so LOS is settled
+    for _ in range(50):
+        e.advance()
+    los_az_before, _ = viz.los_angles(e.turret.azimuth, e.turret.elevation,
+                                      e.base_yaw, e.base_pitch)
+    e.set_disturbance_enabled(False)
+    for _ in range(10):
+        e.advance()
+    los_az_after, _ = viz.los_angles(e.turret.azimuth, e.turret.elevation,
+                                     e.base_yaw, e.base_pitch)
+    check("LOS az essentially unchanged after disabling disturbance",
+          abs(np.degrees(los_az_after - los_az_before)) < 0.5,
+          f"before={np.degrees(los_az_before):.3f}, after={np.degrees(los_az_after):.3f} deg")
+    # Idempotent: disabling again (already off) must not fold a second time.
+    az_before_second_disable = e.turret.azimuth
+    e.set_disturbance_enabled(False)
+    check("disabling twice is a no-op the second time",
+          e.turret.azimuth == az_before_second_disable)
+
+
+def test_recorder_stddev_footer():
+    print("Recorder CSV stddev footer")
+    e = app.SimEngine()
+    e.set_mode(Mode.POSITION)
+    e.stewart.yaw_mag_deg, e.stewart.pitch_mag_deg = 8.0, 5.0
+    e.recorder.start()
+    az_errs_deg = []
+    for _ in range(30):
+        e.advance()
+        az_errs_deg.append(np.degrees(e.az_err))
+    e.recorder.stop()
+
+    path = os.path.join(tempfile.gettempdir(), "turret_log_stddev_test.csv")
+    n = e.recorder.save(path, {"error", "control", "disturbance"})
+    check("recorder saved 30 rows", n == 30)
+
+    with open(path) as f:
+        lines = [line.rstrip("\n") for line in f]
+    header = lines[0].split(",")
+    footer_row = None
+    for line in lines:
+        if line.startswith("stddev_1sigma"):
+            footer_row = line.split(",")
+            break
+    check("csv has a stddev_1sigma footer row", footer_row is not None)
+    if footer_row is not None:
+        az_idx = header.index("az_error")
+        expected = float(np.std(az_errs_deg))
+        got = float(footer_row[az_idx])
+        check("footer az_error stddev matches independently-computed std",
+              abs(got - expected) < 1e-6,
+              f"got={got:.8f}, expected={expected:.8f}")
+
+
+def test_pov_reticle_centered():
+    print("POV reticle centered on viewport")
+    pl, scene, engine = app.build_scene(off_screen=True)
+    hud = app._add_overlays(pl)
+    engine.set_mode(Mode.TARGET)
+    engine.stewart.enabled = False
+    engine.stewart._env = 0.0
+    for _ in range(200):
+        engine.advance()
+        scene.update(engine.turret, engine.base_yaw, engine.base_pitch)
+        viz.update_pov_camera(pl, engine.turret, engine.base_yaw, engine.base_pitch)
+    check("TARGET mode converges az error near zero",
+          abs(np.degrees(engine.az_err)) < 1.0,
+          f"az err={np.degrees(engine.az_err):.3f} deg")
+    shot = os.path.join(tempfile.gettempdir(), "turret_pov_reticle.png")
+    pl.screenshot(shot)
+    check("screenshot with centered reticle rendered without error",
+          os.path.exists(shot))
+
+    reticle = [a for a in pl.renderers[1].actors.values()
+              if hasattr(a, "GetTextProperty")]
+    check("reticle actor present in POV subplot", len(reticle) >= 1)
+    if reticle:
+        import vtk
+        tp = reticle[-1].GetTextProperty()
+        check("reticle text is horizontally centered",
+              tp.GetJustification() == vtk.VTK_TEXT_CENTERED)
+        check("reticle text is vertically centered",
+              tp.GetVerticalJustification() == vtk.VTK_TEXT_CENTERED)
+    pl.close()
+
+
+def test_speed_mode_target_error_toggle():
+    print("Mode 1 - optional target-error readout")
+    e = app.SimEngine()
+    e.set_mode(Mode.SPEED)
+    e.stewart.enabled = False
+    e.stewart._env = 0.0
+    e.control.speed_shows_target_error = True
+    e.control.signal = "constant"
+    e.control.amplitude_rad = 0.0        # zero speed ref -> turret stays put,
+    for _ in range(20):                  # so LOS doesn't lag advance()'s
+        e.advance()                      # internal sub-stepping
+    check("error_is_rate is False when target-error readout is on",
+          e.control.error_is_rate is False)
+    los_az, _ = viz.los_angles(e.turret.azimuth, e.turret.elevation,
+                               e.base_yaw, e.base_pitch)
+    expected_err = e.target_az - los_az
+    check("reported az_err is the target position error, not the speed error",
+          abs(e.az_err - expected_err) < 1e-9,
+          f"az_err={e.az_err:.6f}, expected={expected_err:.6f}")
+
+
+def test_timed_recording_auto_save():
+    print("Timed recording (Record 30 s -> CSV) auto-saves")
+    e = app.SimEngine()
+    e.set_mode(Mode.POSITION)
+    path = os.path.join(tempfile.gettempdir(), "turret_log_timed_test.csv")
+    if os.path.exists(path):
+        os.remove(path)
+    e.start_timed_recording(0.3, path, {"error", "control", "disturbance"})
+    while e.t < 0.3:
+        e.advance()
+    check("auto-save wrote the CSV file", os.path.exists(path))
+    check("engine.last_save_msg is set after auto-save", e.last_save_msg is not None,
+          f"last_save_msg={e.last_save_msg!r}")
+
+
 def test_render_smoke():
     print("Headless render smoke")
     pl, scene, engine = app.build_scene(off_screen=True)
@@ -319,6 +449,9 @@ def main():
               test_mode_position, test_mode_target, test_disturbance_rejection,
               test_recorder, test_camera_zoom_no_reset,
               test_camera_clamped_above_ground, test_tree_placement,
+              test_disturbance_disable_no_recenter, test_recorder_stddev_footer,
+              test_pov_reticle_centered, test_speed_mode_target_error_toggle,
+              test_timed_recording_auto_save,
               test_render_smoke):
         t()
     print(f"\n{_PASS} passed, {_FAIL} failed")
