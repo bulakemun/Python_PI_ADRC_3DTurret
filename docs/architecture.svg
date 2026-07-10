@@ -99,9 +99,15 @@
   <text x="1210" y="185" text-anchor="middle" class="sub" font-weight="700">line of sight</text>
   <text x="1210" y="199" text-anchor="middle" class="sub">(az, el)</text>
 
-  <!-- feedback LOS back to outer sum -->
+  <!-- inner-loop feedback: absolute LOS rate (gyro = gimbal rate ġ + base rate β̇) -->
+  <path class="sig" d="M1168,214 L1168,300 L545,300 L545,195" />
+  <text x="853" y="293" text-anchor="middle" class="sub">absolute LOS rate (gyro: ġ + β̇) → inner-loop feedback</text>
+  <path class="sig" d="M1000,285 L1000,300" />
+  <text x="1016" y="296" text-anchor="middle" class="sub">β̇</text>
+
+  <!-- feedback LOS position back to outer sum -->
   <path class="sig" d="M1160,216 L1160,330 L320,330 L320,195" />
-  <text x="740" y="345" text-anchor="middle" class="sub">measured line-of-sight (los_angles) → outer-loop feedback</text>
+  <text x="740" y="345" text-anchor="middle" class="sub">measured line-of-sight position (los_angles) → outer-loop feedback</text>
 
   <!-- ================= Visualization / Qt ================= -->
   <text x="30" y="410" class="grp">VISUALIZATION &amp; UI</text>

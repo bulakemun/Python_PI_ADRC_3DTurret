@@ -197,8 +197,12 @@ class SimEngine:
             by, bp = self.stewart.angles(self.t)
             self.turret.azimuth += by
             self.turret.elevation += bp
-            self.stewart._env = 0.0
+            self.stewart.snap(0.0)   # base angle -> 0 immediately (folded above)
             self.base_yaw = self.base_pitch = 0.0
+        elif on and not self.stewart.enabled:
+            # Start the sinusoids from a zero crossing so enabling doesn't inject
+            # a base-angle step the SPEED-mode rate loop could never undo.
+            self.stewart.restart(self.t)
         self.stewart.enabled = on
 
     def advance(self) -> None:
@@ -462,7 +466,9 @@ def _make_control_panel(engine: SimEngine):
                       lambda v: setattr(cs, "amplitude_rad", np.radians(v)), "deg/s")
     cl.addWidget(FloatSlider("Kp (position, outer)", 1.0, 20.0, cs.kp_pos, 0.5,
                              lambda v: setattr(cs, "kp_pos", v)))
-    cl.addWidget(FloatSlider("Speed Kp (inner)", 0.0, 20.0, cs.kp_speed, 0.1,
+    # Floored above zero: Kp_s = 0 guts the inner loop (dead/near-unstable
+    # depending on Ki_s and the outer gain).
+    cl.addWidget(FloatSlider("Speed Kp (inner)", 0.5, 20.0, cs.kp_speed, 0.1,
                              lambda v: setattr(cs, "kp_speed", v)))
     cl.addWidget(FloatSlider("Speed Ki (inner)", 0.0, 20.0, cs.ki_speed, 0.1,
                              lambda v: setattr(cs, "ki_speed", v)))

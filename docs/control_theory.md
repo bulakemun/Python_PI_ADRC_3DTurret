@@ -90,8 +90,30 @@ on/off envelope (ramp ~0.3 s) so toggling doesn't step the base angle.
 
 On **disable**, the current base angle is *folded into the gimbal*
 (`g += β`, then `e := 0`) so the LOS is continuous (`app.SimEngine.set_disturbance_enabled`).
-**Check:** the analytic `β̇` omits the `ė·A·sin` envelope-derivative term — a
-brief (~0.3 s) transient during ramp-up only; disable is exact (fold + e=0).
+
+**Enabling must not inject a position step.** Two mechanisms together keep the
+enable transient clean:
+
+1. `β̇` includes the envelope-derivative term `ė·A·sin(θ)` (`_env_rate`, tracked
+   exactly in `advance`), so the gyro reports the *true* rate even while the
+   envelope ramps — a consistent model.
+2. On enable both sinusoids are **restarted at a zero crossing**
+   (`StewartDisturbance.restart`, per-axis phase refs), so the base grows
+   smoothly from rest instead of sweeping up to `A·sin(ωt)` during the ramp.
+
+(2) is the one that matters behaviourally. A pure rate loop (SPEED mode) has no
+position feedback, so any base-angle *step* injected while enabling is frozen
+into the LOS forever. Measured — enabling a 15° yaw + 15° pitch disturbance at a
+sine peak with `ω_ref = 0`: **+14.9°** permanent offset with neither fix,
+**+16.7°** with only the envelope term (the loop fights the sweep, but rate-limit
+saturation plus back-calculation anti-windup then unwind it), **−0.02°** with
+both. Steady-state rejection is unaffected (LOS peak 1.60° either way).
+
+**Disable-fold is first-order, not exact:** `g += β` is additive, but the true
+LOS is the rotation composition `Rz(β_y)Ry(−β_p)·Rz(g_az)Ry(−g_el)`. With both
+axes deflected there is an O(β·g) LOS jump on disable — worst-case ~0.6° at a
+15°+15° base with a deflected gimbal. An exact fold would set
+`g' = los_angles(g, β)` (i.e. `g'_az = LOS_az`, `g'_el = LOS_el`).
 
 ---
 
@@ -260,8 +282,13 @@ stability. **Auditor: verify this — it's the crux of why the change is safe.**
    rotation composition used for `LOS_pos`. Exact on a single axis; O(β·g)
    cross-coupling otherwise. Confirm the bias is small for ≤15°+15° and does not
    accumulate into a steady pointing offset.
-2. **Analytic base rate** ignores the envelope derivative `ė` (transient only,
-   ~0.3 s on enable). Disable is exact (fold + `e=0`).
+2. **Base rate includes the envelope-derivative term** `ė·A·sin` (`_env_rate`),
+   and **enable restarts each sinusoid at a zero crossing** so no position step
+   is injected (§4) — the latter is what actually removes the SPEED-mode enable
+   offset. The **disable-fold is exact only to first order** — O(β·g) LOS jump,
+   worst-case ~0.6° at 15°+15° base with a deflected gimbal (see §4).
+   *Latent:* with `enabled=True` at construction the pitch phase (π/2) starts the
+   base at its peak, so SPEED mode begins with an `A_p` elevation offset.
 3. **Outer loop is P-only** ⇒ type-0 in position ⇒ *finite* steady-state error
    to a constant reference and a bounded lag/error to a sinusoid
    (≈ magnitude / loop gain). Deliberate. Confirm this is acceptable, or note an

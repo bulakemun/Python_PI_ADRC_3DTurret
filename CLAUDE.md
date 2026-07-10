@@ -74,7 +74,7 @@ deg / deg/s / Hz at the boundary. The outer position gain Kp is unit-agnostic
 
 Tests: `uv run python tests/test_system.py` (PI + anti-windup, reference signals,
 disturbance, LOS composition, unit conversions, the three control modes,
-disturbance rejection, tree placement, headless render — 25 checks).
+disturbance rejection, tree placement, headless render).
 
 Scenery (ground grass texture, tree bark, and a distant mountain elevation
 mesh) is downloaded on first run by `simulation/assets.py` — grass/bark from
