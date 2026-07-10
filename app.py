@@ -208,9 +208,15 @@ class SimEngine:
         for _ in range(SUBSTEPS):
             self.stewart.advance(DT)   # ramp the on/off envelope smoothly
             by, bp = self.stewart.angles(self.t)
+            byr, bpr = self.stewart.rates(self.t)
             los_az, los_el = viz.los_angles(turret.azimuth, turret.elevation, by, bp)
+            # Gyro feedback: the inner speed loop regulates the ABSOLUTE line-of-
+            # sight rate (gimbal rate + base rate), so the base disturbance shows
+            # up in the speed error and is rejected -- not just the gimbal rate.
+            los_rate_az = turret.azimuth_rate + byr
+            los_rate_el = turret.elevation_rate + bpr
             az_res, el_res = cs.step(
-                self.t, los_az, turret.azimuth_rate, los_el, turret.elevation_rate,
+                self.t, los_az, los_rate_az, los_el, los_rate_el,
                 self.target_az, self.target_el,
             )
             turret.step(az_res.rate_cmd, el_res.rate_cmd)

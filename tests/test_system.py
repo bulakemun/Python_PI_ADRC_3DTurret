@@ -95,6 +95,10 @@ def test_disturbance():
     zc = np.sum(np.diff(np.sign(yaw)) != 0)
     check("yaw frequency ~0.2 Hz", abs(zc / 2 / 20.0 - 0.2) < 0.02,
           f"freq={zc / 2 / 20.0:.3f}")
+    # Analytic base rate (for the gyro feedback) matches a numeric derivative.
+    numeric = (d.yaw(1.001) - d.yaw(0.999)) / 0.002
+    check("yaw_rate matches numeric derivative",
+          abs(d.yaw_rate(1.0) - numeric) < 1e-4, f"{d.yaw_rate(1.0):.5f} vs {numeric:.5f}")
     # Toggling off ramps a smooth envelope (no instantaneous jump), then stills.
     d.enabled = False
     d.advance(0.01)
@@ -153,6 +157,27 @@ def test_mode_speed():
     rate_deg = np.degrees(e.turret.azimuth_rate)
     check("axis speed tracks the speed reference", abs(rate_deg - 30.0) < 2.0,
           f"az rate={rate_deg:.2f} deg/s")
+
+
+def test_mode_speed_stabilizes():
+    print("Mode 1 - speed loop stabilises against the disturbance")
+    e = app.SimEngine()
+    e.set_mode(Mode.SPEED)
+    e.control.signal = "constant"
+    e.control.amplitude_rad = 0.0                # command LOS rate = 0 (hold)
+    e.stewart.yaw_mag_deg, e.stewart.yaw_freq_hz = 10.0, 0.2
+    e.stewart.pitch_mag_deg, e.stewart.pitch_freq_hz = 8.0, 0.25
+    peak = 0.0
+    for k in range(1500):                        # ~45 s
+        e.advance()
+        los_az, _ = viz.los_angles(e.turret.azimuth, e.turret.elevation,
+                                   e.base_yaw, e.base_pitch)
+        if k > 400:                              # after settling
+            peak = max(peak, abs(np.degrees(los_az)))
+    # Gyro rate feedback should reject the 10 deg base wobble to a few degrees;
+    # without it the LOS would swing the full +/-10 deg (gimbal held, base free).
+    check("speed loop holds the LOS against the base disturbance", peak < 3.0,
+          f"LOS az peak={peak:.2f} deg (open-loop ~10 deg)")
 
 
 def test_mode_position():
@@ -446,7 +471,8 @@ def test_render_smoke():
 def main():
     for t in (test_pi_controller, test_reference_signals, test_disturbance,
               test_los_composition, test_unit_conversions, test_mode_speed,
-              test_mode_position, test_mode_target, test_disturbance_rejection,
+              test_mode_speed_stabilizes, test_mode_position, test_mode_target,
+              test_disturbance_rejection,
               test_recorder, test_camera_zoom_no_reset,
               test_camera_clamped_above_ground, test_tree_placement,
               test_disturbance_disable_no_recenter, test_recorder_stddev_footer,

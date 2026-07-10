@@ -133,7 +133,8 @@ class ControlSystem:
         Args (all SI, radians / rad/s):
             t: current time.
             los_az/los_el: measured line-of-sight angles (base + gimbal).
-            rate_az/rate_el: measured axis (gimbal) rates.
+            rate_az/rate_el: measured line-of-sight rates (gyro: gimbal + base
+                rate), so the inner speed loop stabilises the absolute pointing.
             target_az/target_el: geometric target angles (for TARGET mode; the
                 elevation also serves as the POSITION-mode elevation setpoint).
 

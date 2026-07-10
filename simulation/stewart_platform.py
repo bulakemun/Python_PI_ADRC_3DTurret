@@ -65,6 +65,22 @@ class StewartDisturbance:
             2.0 * np.pi * self.pitch_freq_hz * t + self.pitch_phase
         )
 
+    def yaw_rate(self, t: float) -> float:
+        """Base yaw angular rate at ``t`` (rad/s) -- what a gyro would sense."""
+        w = 2.0 * np.pi * self.yaw_freq_hz
+        return self._env * np.radians(self.yaw_mag_deg) * w * np.cos(w * t)
+
+    def pitch_rate(self, t: float) -> float:
+        """Base pitch angular rate at ``t`` (rad/s) -- what a gyro would sense."""
+        w = 2.0 * np.pi * self.pitch_freq_hz
+        return self._env * np.radians(self.pitch_mag_deg) * w * np.cos(
+            w * t + self.pitch_phase
+        )
+
     def angles(self, t: float):
         """Convenience: ``(yaw, pitch)`` base disturbance at ``t`` (radians)."""
         return self.yaw(t), self.pitch(t)
+
+    def rates(self, t: float):
+        """Convenience: ``(yaw_rate, pitch_rate)`` base rate at ``t`` (rad/s)."""
+        return self.yaw_rate(t), self.pitch_rate(t)
