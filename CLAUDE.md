@@ -12,14 +12,23 @@ Current scope:
 - Three selectable control modes: 1 SPEED (speed reference, deg/s), 2 POSITION
   (degree reference incl. a constant setpoint), 3 TARGET (auto-aim: barrel/target
   position error feeds the position loop).
+- Two selectable plant models: a kinematic velocity servo (inner PI outputs a rate)
+  and a torque-driven second-order model with inertia J, viscous damping B, motor
+  torque constant K_t + current limit i_max (torque saturation), and Coulomb
+  friction with a Karnopp stiction band (inner PI outputs a current). Switching
+  resets plant + controller integrators.
+- Toggleable zero-mean white sensor noise on the four controller measurements
+  (LOS angle/rate, az/el); rendering and recording use the clean true state.
 - Reference signals are square / sine / constant, tunable live.
 - Line of sight targets a static board 400 m downrange.
 - Visualization is a real-time 3D-rendered (PyVista/VTK) world view plus a turret-mounted camera POV.
-- Controls live in a secondary Qt window (mode switch + all sliders) with a live
-  error-signal graph; the main 3D window is kept uncluttered.
+- Controls live in a secondary Qt window (plant + mode switch + all sliders) with a
+  live error-signal graph; the main 3D window is kept uncluttered.
 
-Out of scope for now (future work): base translation, multi-target tracking, sensor
-noise, feedforward / state-space / MPC controllers, realistic ballistics.
+Out of scope for now (future work): base translation, multi-target tracking,
+back-EMF/voltage electrical dynamics, gear backlash, structural resonance,
+reaction torques from base motion, feedforward / state-space / MPC controllers,
+realistic ballistics.
 
 ## Architecture
 
@@ -33,7 +42,7 @@ Python_3DTurret/
 │   ├── control_system.py        # Cascade controller: outer position P + inner speed PI; modes
 │   └── reference_signals.py     # square_wave(), sine_wave(), constant_wave()
 ├── simulation/
-│   ├── turret_model.py          # Turret plant model (2-axis gimbal, first-order rate)
+│   ├── turret_model.py          # Plant models: kinematic TurretModel + TorqueTurretModel
 │   ├── target_board.py          # Static target board geometry/position (400 m)
 │   ├── stewart_platform.py      # Base yaw/pitch sine disturbance (StewartDisturbance)
 │   ├── assets.py                # Downloads/caches scenery textures + mountain mesh

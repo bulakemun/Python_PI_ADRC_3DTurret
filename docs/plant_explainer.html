@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Turret Sim — Controller, Torque & Inertia</title>
+</head>
+<body>
+<style>
+  :root {
+    --paper: #10161c;
+    --panel: #182129;
+    --ink: #dde5ea;
+    --ink-soft: #93a2ae;
+    --line: #2b3742;
+    --accent: #45b6bb;
+    --accent-soft: #143439;
+    --live: #6cc189;
+    --live-bg: #16301f;
+    --code: #7ea8e0;
+    --code-bg: #172740;
+    --none: #c9a86a;
+    --none-bg: #2e2618;
+    --diagram-plant: #16241b;
+    --diagram-dist: #2a1d18;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: "Avenir Next", "Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif;
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    --paper: #f2f4f5; --panel: #ffffff; --ink: #1b2530; --ink-soft: #4c5a66;
+    --line: #d5dce1; --accent: #0f6e73; --accent-soft: #e2efef;
+    --live: #2e7d46; --live-bg: #e4f1e7; --code: #3d6bb3; --code-bg: #e6edf7;
+    --none: #8a6d3b; --none-bg: #f3ecdd;
+    --diagram-plant: #eef4ef; --diagram-dist: #f7ece8;
+    color-scheme: light;
+  }
+
+  html { background: var(--paper); }
+  body {
+    font-family: var(--sans);
+    color: var(--ink);
+    line-height: 1.55;
+    margin: 0;
+    padding: 3rem 1.25rem 5rem;
+  }
+  .page { max-width: 62rem; margin: 0 auto; display: flex; flex-direction: column; gap: 2.75rem; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  header h1 {
+    font-size: clamp(1.6rem, 3.5vw, 2.3rem);
+    line-height: 1.15;
+    margin: 0.45rem 0 0.9rem;
+    text-wrap: balance;
+    font-weight: 650;
+  }
+  .lede { max-width: 44rem; font-size: 1.03rem; color: var(--ink-soft); margin: 0; }
+
+  h2 {
+    font-size: 1.22rem;
+    margin: 0 0 0.35rem;
+    font-weight: 650;
+    text-wrap: balance;
+  }
+  h3 { font-size: 0.98rem; margin: 1.4rem 0 0.4rem; font-weight: 650; }
+  section > p, section li { max-width: 44rem; }
+  p { margin: 0.6rem 0; }
+  .section-note { color: var(--ink-soft); font-size: 0.92rem; margin-top: 0; }
+
+  .tldr {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    border-radius: 6px;
+    padding: 1.1rem 1.35rem;
+  }
+  .tldr p { margin: 0.4rem 0; max-width: none; }
+  .tldr strong { color: var(--accent); }
+
+  code, .mono {
+    font-family: var(--mono);
+    font-size: 0.87em;
+  }
+  code {
+    background: var(--accent-soft);
+    padding: 0.08em 0.35em;
+    border-radius: 4px;
+  }
+  pre {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.9rem 1.1rem;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 0.84rem;
+    line-height: 1.6;
+    max-width: 44rem;
+  }
+  pre code { background: none; padding: 0; }
+
+  .chip {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.12rem 0.5rem;
+    border-radius: 99px;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+  .chip.live { color: var(--live); background: var(--live-bg); }
+  .chip.code { color: var(--code); background: var(--code-bg); }
+  .chip.none { color: var(--none); background: var(--none-bg); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 1.2rem; margin: 0.8rem 0 0; font-size: 0.88rem; color: var(--ink-soft); align-items: baseline; }
+  .legend > span { display: flex; gap: 0.5rem; align-items: baseline; }
+
+  .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { text-align: left; padding: 0.55rem 0.9rem; border-top: 1px solid var(--line); vertical-align: top; }
+  thead th {
+    border-top: none;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-soft);
+    font-weight: 600;
+  }
+  td.num, td .mono { font-variant-numeric: tabular-nums; }
+  td:first-child { font-family: var(--mono); font-size: 0.82rem; white-space: nowrap; }
+
+  .diagram-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 1rem 0.5rem;
+  }
+  .diagram-wrap svg { display: block; min-width: 900px; margin: 0 auto; }
+  .dg-box { fill: var(--panel); stroke: var(--ink-soft); stroke-width: 1.3; }
+  .dg-ctrl { fill: var(--accent-soft); stroke: var(--accent); }
+  .dg-plant { fill: var(--diagram-plant); stroke: var(--live); }
+  .dg-dist { fill: var(--diagram-dist); stroke: var(--none); }
+  .dg-ghost { fill: none; stroke: var(--none); stroke-dasharray: 5 4; stroke-width: 1.3; }
+  .dg-sum { fill: var(--panel); stroke: var(--ink); stroke-width: 1.3; }
+  .dg-line { stroke: var(--ink); stroke-width: 1.4; fill: none; }
+  .dg-t { font-family: var(--sans); font-size: 13px; fill: var(--ink); font-weight: 600; }
+  .dg-s { font-family: var(--mono); font-size: 10.5px; fill: var(--ink-soft); }
+  .dg-m { font-family: var(--mono); font-size: 12px; fill: var(--ink); }
+  .dg-g { font-family: var(--mono); font-size: 10.5px; fill: var(--none); }
+
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+  }
+  .card h3 { margin-top: 0; }
+  .card p { font-size: 0.92rem; color: var(--ink-soft); }
+  .card p strong, .card p code { color: var(--ink); }
+
+  footer { font-size: 0.82rem; color: var(--ink-soft); border-top: 1px solid var(--line); padding-top: 1.2rem; }
+  footer code { background: none; padding: 0; }
+  a { color: var(--accent); }
+  .theme-toggle {
+    position: fixed; top: 1rem; right: 1rem;
+    font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em;
+    color: var(--ink-soft); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 99px;
+    padding: 0.35rem 0.85rem; cursor: pointer;
+  }
+  .theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+
+<button class="theme-toggle" id="themeToggle" type="button" aria-pressed="false">LIGHT MODE</button>
+
+<div class="page">
+
+<header>
+  <p class="eyebrow">Python_3DTurret · Technical brief · 2026-07-12</p>
+  <h1>Controller, motor torque &amp; inertia: where the physics lives — and where it doesn't</h1>
+  <p class="lede">A plain-language map of the simulation's control loop and plant model, what each
+  physical quantity corresponds to in code, and which of them you can actually turn. Sourced
+  from <span class="mono">turret_model.py</span>, <span class="mono">control_system.py</span>,
+  <span class="mono">pi_controller.py</span>, <span class="mono">stewart_platform.py</span> and <span class="mono">app.py</span>.</p>
+</header>
+
+<div class="tldr">
+  <p><strong>The short answer:</strong> the sim now ships <strong>two selectable plants</strong>. The default is a
+  <em>kinematic velocity servo</em>: the controller commands an angular <em>rate</em> (deg/s) and the actual rate
+  chases it through a single first-order lag, <code>τ = 0.2 s</code> — that one number stands in for the whole
+  drivetrain (torque, inertia, friction, gearbox, current loop), and the sections below describe it. The second plant
+  is a <em>torque-driven second-order</em> model where those quantities are <strong>explicit</strong>: inertia
+  <code>J</code>, viscous damping <code>B</code>, a motor torque constant <code>K_t</code> with a current limit
+  <code>i_max</code> (so torque saturates at <code>τ_max = K_t·i_max</code>), and Coulomb friction with a Karnopp
+  stiction band; there the inner PI commands a <em>current</em>. A toggleable white <em>sensor noise</em> can also be
+  injected on the controller's measurements. See <code>control_theory.md</code> §3b/§3c for the equations.</p>
+</div>
+
+<section>
+  <p class="eyebrow">01 · Signal chain</p>
+  <h2>One axis, end to end</h2>
+  <p>Azimuth and elevation each run an identical, independent chain (a classic cascaded servo).
+  The gold dashed box is where a torque model <em>would</em> sit — today it's collapsed into the τ lag.</p>
+
+  <div class="diagram-wrap">
+  <svg viewBox="0 0 980 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Block diagram: reference through outer P and inner PI controllers into a first-order velocity-servo plant, with base disturbance added kinematically and both position and rate fed back">
+    <defs>
+      <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+      </marker>
+    </defs>
+    <g color="var(--ink)">
+      <!-- reference -->
+      <rect x="14" y="120" width="118" height="52" rx="6" class="dg-box dg-ctrl"/>
+      <text x="73" y="142" text-anchor="middle" class="dg-t">Reference</text>
+      <text x="73" y="158" text-anchor="middle" class="dg-s">square/sine/const</text>
+
+      <!-- outer sum -->
+      <circle cx="176" cy="146" r="13" class="dg-sum"/>
+      <text x="176" y="150.5" text-anchor="middle" class="dg-m">Σ</text>
+      <text x="163" y="171" class="dg-s">−</text>
+      <path class="dg-line" stroke="currentColor" marker-end="url(#ah)" d="M132,146 L161,146"/>
+
+      <!-- outer P -->
+      <rect x="212" y="120" width="108" height="52" rx="6" class="dg-box dg-ctrl"/>
+      <text x="266" y="142" text-anchor="middle" class="dg-t">Position P</text>
+      <text x="266" y="158" text-anchor="middle" class="dg-s">Kp_pos [1/s]</text>
+      <path class="dg-line" stroke="currentColor" marker-end="url(#ah)" d="M189,146 L210,146"/>
+      <text x="336" y="138" class="dg-s">ω_ref</text>
+
+      <!-- inner sum -->
+      <circle cx="372" cy="146" r="13" class="dg-sum"/>
+      <text x="372" y="150.5" text-anchor="middle" class="dg-m">Σ</text>
+      <text x="358" y="171" class="dg-s">−</text>
+      <path class="dg-line" stroke="currentColor" marker-end="url(#ah)" d="M320,146 L357,146"/>
+
+      <!-- inner PI -->
+      <rect x="408" y="120" width="112" height="52" rx="6" class="dg-box dg-ctrl"/>
+      <text x="464" y="142" text-anchor="middle" class="dg-t">Speed PI</text>
+      <text x="464" y="158" text-anchor="middle" class="dg-s">Kp_s + Ki_s/s</text>
+      <path class="dg-line" stroke="currentColor" marker-end="url(#ah)" d="M385,146 L406,146"/>
+      <text x="530" y="138" class="dg-s">u (rate cmd)</text>
+
+      <!-- plant group -->
+      <rect x="566" y="86" width="252" height="110" rx="8" class="dg-ghost"/>
+      <text x="578" y="104" class="dg-g">real drivetrain would live here:</text>
+      <text x="578" y="118" class="dg-g">torque loop · J·ω̇ = τm − b·ω</text>
+
+      <rect x="584" y="128" width="104" height="48" rx="6" class="dg-box dg-plant"/>
+      <text x="636" y="148" text-anchor="middle" class="dg-t">Rate lag</text>
+      <text x="636" y="164" text-anchor="middle" class="dg-s">1/(τs+1), τ=0.2</text>
+      <path class="dg-line" stroke="currentColor" marker-end="url(#ah)" d="M520,146 L582,146"/>
+
+      <rect x="718" y="128" width="76" height="48" rx="6" class="dg-box dg-plant"/>
+      <text x="756" y="148" text-anchor="middle" class="dg-t">∫ dt</text>
+      <text x="756" y="164" text-anchor="middle" class="dg-s">angle</text>
+      <path class="dg-line" stroke="currentColor" marker-end="url(#ah)" d="M688,152 L716,152"/>
+      <text x="695" y="144" class="dg-s">ġ</text>
+
+      <!-- disturbance -->
+      <rect x="700" y="14" width="196" height="48" rx="6" class="dg-box dg-dist"/>
+      <text x="798" y="34" text-anchor="middle" class="dg-t">Stewart platform</text>
+      <text x="798" y="50" text-anchor="middle" class="dg-s">β = A·sin(2πft) · env</text>
+
+      <!-- LOS sum -->
+      <circle cx="874" cy="152" r="14" class="dg-sum"/>
+      <text x="874" y="156.5" text-anchor="middle" class="dg-m">⊕</text>
+      <path class="dg-line" stroke="currentColor" marker-end="url(#ah)" d="M794,152 L857,152"/>
+      <path class="dg-line" stroke="currentColor" marker-end="url(#ah)" d="M874,62 L874,135"/>
+      <text x="882" y="104" class="dg-s">β, β̇</text>
+      <text x="906" y="148" class="dg-t">LOS</text>
+      <text x="906" y="163" class="dg-s">= base ∘ gimbal</text>
+
+      <!-- feedback: rate -->
+      <path class="dg-line" stroke="currentColor" marker-end="url(#ah)" d="M874,169 L874,232 L372,232 L372,162"/>
+      <text x="560" y="226" text-anchor="middle" class="dg-s">LOS rate  (gyro:  ġ + β̇)  → inner loop</text>
+
+      <!-- feedback: position -->
+      <path class="dg-line" stroke="currentColor" marker-end="url(#ah)" d="M874,169 L874,282 L176,282 L176,162"/>
+      <text x="470" y="276" text-anchor="middle" class="dg-s">LOS angle  (atan2/asin of composed pointing)  → outer loop</text>
+
+      <text x="14" y="318" class="dg-s">SPEED mode bypasses the outer loop: the reference feeds ω_ref directly. POSITION/TARGET run the full cascade.</text>
+    </g>
+  </svg>
+  </div>
+
+  <h3>What each stage does</h3>
+  <p><strong>Outer position loop</strong> — pure P (<code>Ki = 0</code>). Turns a pointing error (rad) into a
+  speed reference (rad/s), clamped to ±180 deg/s. <span class="mono">control_system.py:87</span></p>
+  <p><strong>Inner speed loop</strong> — PI with back-calculation anti-windup. Its feedback is the <em>absolute</em>
+  line-of-sight rate (gimbal rate + analytic base rate — what a rate gyro on the barrel would read), so base motion
+  shows up as speed error and gets rejected. Output: a rate command <code>u</code>, clamped to ±180 deg/s.
+  <span class="mono">pi_controller.py:43</span></p>
+  <p><strong>Plant</strong> — per axis, semi-implicit Euler at <code>dt = 0.01 s</code>:</p>
+  <pre><code>u     = clip(u, ±rate_limit)          # ±180 deg/s
+ω    += (u − ω) · dt / τ              # actual rate lags the command, τ = 0.2 s
+φ    += ω · dt                        # angle integrates the actual rate</code></pre>
+  <p>That's the whole plant (<span class="mono">turret_model.py:55–65</span>). No force, no torque, no mass —
+  the "motor" is the assumption that the rate converges to the command with a 0.2 s time constant.</p>
+</section>
+
+<section>
+  <p class="eyebrow">02 · The physics dictionary</p>
+  <h2>Where torque and inertia went</h2>
+  <p class="section-note">Every real-drivetrain quantity is either lumped into τ, implied by it, or absent.</p>
+  <div class="cols">
+    <div class="card">
+      <h3>Inertia J → lumped into τ</h3>
+      <p>In a real velocity-controlled servo, the closed rate loop behaves roughly first-order with a time constant
+      set by inertia over drive stiffness (≈ <code>J/b</code>, or 1/bandwidth of the vendor's velocity loop).
+      Here that whole story is the single number <code>τ = 0.2 s</code>. <strong>Raise τ ⇒ "heavier turret /
+      weaker drive"; lower τ ⇒ stiffer, snappier axis.</strong> Both axes share one τ — a real turret's azimuth
+      ring (which carries everything) would be slower than elevation.</p>
+    </div>
+    <div class="card">
+      <h3>Motor torque → implied, uncapped</h3>
+      <p>Torque would be <code>τ_m = J·ω̇</code>. The model's acceleration is <code>ω̇ = (u − ω)/τ</code>, so the
+      implied torque is proportional to rate error — and is <strong>never saturated</strong>. Worst case
+      (command +180 deg/s while spinning −180) the axis accelerates at <span class="mono">1800 deg/s²</span>;
+      the sim happily "produces" whatever torque that takes. A torque-limited motor would cap ω̇ at
+      <code>τ_max/J</code> and show slew-rate limiting the current model can't.</p>
+    </div>
+    <div class="card">
+      <h3>Max motor speed → the rate limit</h3>
+      <p><code>RATE_LIMIT = 180 deg/s</code> (<span class="mono">app.py:45</span>) clips the <em>command</em>, playing
+      the role of the motor's no-load speed / drive velocity limit. The same value clamps the outer loop's speed
+      reference, so the cascade can't ask the inner loop for more than the plant accepts (that's what keeps
+      anti-windup honest).</p>
+    </div>
+    <div class="card">
+      <h3>Friction, gravity, backlash → absent</h3>
+      <p>No viscous or Coulomb friction, no gravity imbalance pulling elevation down, no gear backlash, no structural
+      resonance, no sensor noise (noise is on the README roadmap). The only nonlinearities are the two saturations
+      (rate command, ±90° elevation hard stop) — and the hard stop simply zeroes the rate,
+      <span class="mono">turret_model.py:76</span>.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <p class="eyebrow">03 · Parameter inventory</p>
+  <h2>What you can turn, and from where</h2>
+  <div class="legend">
+    <span><span class="chip live">Live slider</span> change while running, Qt panel</span>
+    <span><span class="chip code">Code constant</span> one-line edit, restart</span>
+    <span><span class="chip none">Not modeled</span> would need new code</span>
+  </div>
+
+  <h3>Controller</h3>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Parameter</th><th>Physical meaning</th><th>Default</th><th>Range / where</th><th></th></tr></thead>
+    <tbody>
+      <tr><td>kp_pos</td><td>Outer position stiffness [1/s] — how hard pointing error is converted to slew rate</td><td class="num">8.0</td><td>1–20, step 0.5 · panel slider</td><td><span class="chip live">Live slider</span></td></tr>
+      <tr><td>kp_speed</td><td>Inner rate-loop proportional gain — dimensionless (kinematic) or A per rad/s (torque)</td><td class="num">6.0 / 36 (torque)</td><td>0.5–20 (kin) · 0–120 (torque) · panel</td><td><span class="chip live">Live slider</span></td></tr>
+      <tr><td>ki_speed</td><td>Inner rate-loop integral gain — kills steady rate error (units follow the plant)</td><td class="num">2.0 / 72 (torque)</td><td>0–20 (kin) · 0–200 (torque) · panel</td><td><span class="chip live">Live slider</span></td></tr>
+      <tr><td>mode</td><td>SPEED (rate ref, inner loop only) · POSITION (angle ref, full cascade) · TARGET (auto-aim)</td><td class="num">SPEED</td><td>panel dropdown</td><td><span class="chip live">Live slider</span></td></tr>
+      <tr><td>signal / amplitude / frequency</td><td>Reference shape (square·sine·constant), size (deg or deg/s by mode), rate</td><td class="num">square, 15, 0.3&nbsp;Hz</td><td>amp 0–90 · freq 0.05–2&nbsp;Hz · panel</td><td><span class="chip live">Live slider</span></td></tr>
+      <tr><td>max_speed_ref</td><td>Clamp on the outer loop's speed reference</td><td class="num">= rate limit</td><td><span class="mono">control_system.py:67</span></td><td><span class="chip code">Code constant</span></td></tr>
+      <tr><td>el_hold</td><td>POSITION-mode elevation setpoint (board elevation)</td><td class="num">≈ 1.81°</td><td>derived from board geometry, <span class="mono">app.py:154</span></td><td><span class="chip code">Code constant</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Plant ("motor &amp; mechanics")</h3>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Parameter</th><th>Physical meaning</th><th>Default</th><th>Range / where</th><th></th></tr></thead>
+    <tbody>
+      <tr><td>Plant model</td><td>Kinematic velocity servo (default) or torque-driven second-order</td><td class="num">Kinematic</td><td>panel dropdown</td><td><span class="chip live">Live slider</span></td></tr>
+      <tr><td>tau (τ)</td><td><em>Kinematic plant only</em> — rate-response lag standing in for inertia/torque/drive bandwidth</td><td class="num">0.2 s</td><td>ctor arg (<span class="mono">app.py</span>)</td><td><span class="chip code">Code constant</span></td></tr>
+      <tr><td>RATE_LIMIT</td><td>Max axis speed (drive velocity limit) — both plants</td><td class="num">180 deg/s</td><td><span class="mono">app.py</span></td><td><span class="chip code">Code constant</span></td></tr>
+      <tr><td>elevation_limits</td><td>Mechanical hard stops (rate zeroed at the stop)</td><td class="num">±90°</td><td>ctor default, <span class="mono">turret_model.py</span></td><td><span class="chip code">Code constant</span></td></tr>
+      <tr><td>DT / SUBSTEPS</td><td>Integration step and plant substeps per rendered frame</td><td class="num">0.01 s / 3</td><td><span class="mono">app.py</span></td><td><span class="chip code">Code constant</span></td></tr>
+      <tr><td>Inertia J (per axis)</td><td><strong>Torque plant</strong> — rotational mass (az carries the gimbal, el the barrel)</td><td class="num">6.0 / 2.5 kg·m²</td><td><span class="mono">TORQUE_PARAMS (app.py)</span></td><td><span class="chip code">Code constant</span></td></tr>
+      <tr><td>Torque limit τ_max = K_t·i_max, motor const K_t</td><td><strong>Torque plant</strong> — torque saturation + current→torque map</td><td class="num">40 N·m (K_t 0.8, i_max 50)</td><td><span class="mono">TORQUE_PARAMS (app.py)</span></td><td><span class="chip code">Code constant</span></td></tr>
+      <tr><td>Viscous B + Coulomb τ_c (Karnopp band)</td><td><strong>Torque plant</strong> — speed-proportional loss + breakaway friction (no creep below τ_c)</td><td class="num">B 1.2 · τ_c 0.8 N·m</td><td><span class="mono">TORQUE_PARAMS (app.py)</span></td><td><span class="chip code">Code constant</span></td></tr>
+      <tr><td>Sensor noise σ (angle / rate)</td><td>Zero-mean white noise on the controller's LOS measurements (truth stays clean)</td><td class="num">off (0)</td><td>0–0.5° / 0–2°·s⁻¹ · panel sliders</td><td><span class="chip live">Live slider</span></td></tr>
+      <tr><td>Backlash, gravity imbalance, back-EMF, resonance</td><td>Gear lash, load torque, electrical dynamics, structure</td><td class="num">—</td><td>still absent</td><td><span class="chip none">Not modeled</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Disturbance (Stewart platform)</h3>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Parameter</th><th>Physical meaning</th><th>Default</th><th>Range / where</th><th></th></tr></thead>
+    <tbody>
+      <tr><td>yaw / pitch magnitude</td><td>Base wobble amplitude the loop must reject</td><td class="num">6° / 5°</td><td>3–15°, step 0.5 · panel sliders</td><td><span class="chip live">Live slider</span></td></tr>
+      <tr><td>yaw / pitch frequency</td><td>Base wobble rate</td><td class="num">0.20 / 0.25 Hz</td><td>0.1–0.4 Hz · panel sliders</td><td><span class="chip live">Live slider</span></td></tr>
+      <tr><td>enabled</td><td>Disturbance on/off (0.3 s ramped envelope)</td><td class="num">on</td><td>panel button</td><td><span class="chip live">Live slider</span></td></tr>
+      <tr><td>pitch_phase / ramp_time</td><td>Yaw–pitch phase offset; envelope ramp duration</td><td class="num">π/2 · 0.3 s</td><td>ctor defaults, <span class="mono">stewart_platform.py:30,32</span></td><td><span class="chip code">Code constant</span></td></tr>
+      <tr><td>Board distance / height</td><td>Target geometry (sets TARGET-mode angles)</td><td class="num">400 m / 14 m</td><td><span class="mono">target_board.py:17</span>, <span class="mono">app.py:150</span></td><td><span class="chip code">Code constant</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <p class="eyebrow">04 · Real torque dynamics — now implemented</p>
+  <h2>The upgrade path is one function <span style="font-weight:400;font-size:0.7em;color:#2f7a3d;">✓ done — <code>TorqueTurretModel</code></span></h2>
+  <p><strong>This upgrade has since been implemented</strong> as <code>TorqueTurretModel</code> (selectable in the
+  panel); the choice below was taken option-A: the inner PI's output becomes a <em>current</em> command, no third
+  loop. Coulomb friction uses a Karnopp stiction band and torque saturates at <code>τ_max = K_t·i_max</code>. The
+  historical note below describes the (still-default) kinematic plant and the design sketch that was followed.</p>
+  <p>Everything torque-shaped funnels through the plant's <code>_advance_axis</code>. Swapping the first-order
+  rate lag for a torque-driven second-order axis looks like:</p>
+  <pre><code># per axis: J·ω̇ = τ_m − b·ω − τ_load
+tau_m  = clip(torque_cmd, ±tau_max)      # motor torque saturation (NEW param)
+omega += (tau_m − b*omega − tau_grav) / J * dt   # J, b, tau_grav (NEW params)
+angle += omega * dt</code></pre>
+  <p>Then the inner PI's output becomes a <em>torque</em> command instead of a rate command (or you keep the rate
+  command and add a third, innermost torque/current loop — the standard industrial triple cascade:
+  position → velocity → current). New tunable physics you'd gain: per-axis <code>J</code> (azimuth carries the whole
+  gimbal, so J_az &gt; J_el), <code>τ_max</code> (acceleration saturation and honest slew limiting),
+  <code>b</code> (damping), and a gravity imbalance torque on elevation. The controller code
+  (<span class="mono">control/</span>) wouldn't need structural changes — it already only sees errors and gains —
+  though the gains would need retuning since the plant order changes.</p>
+  <p>Until then, remember the honest reading of results: <strong>the sim validates loop architecture and
+  disturbance-rejection logic, not actuator sizing.</strong> Nothing in it will ever torque-saturate,
+  overheat, or fail to accelerate.</p>
+</section>
+
+<footer>
+  <p>Compiled from the repo at commit <span class="mono">9867a6e</span> — sources:
+  <span class="mono">simulation/turret_model.py</span> (plant), <span class="mono">control/pi_controller.py</span> +
+  <span class="mono">control/control_system.py</span> (cascade), <span class="mono">simulation/stewart_platform.py</span>
+  (disturbance), <span class="mono">app.py</span> (wiring, constants, sliders). See
+  <span class="mono">docs/control_theory.md</span> for the full derivation and
+  <span class="mono">docs/proposed_fixes.md</span> for the open audit findings.</p>
+</footer>
+
+</div>
+
+<script>
+  const btn = document.getElementById('themeToggle');
+  const root = document.documentElement;
+  function apply(light) {
+    root.dataset.theme = light ? 'light' : 'dark';
+    btn.textContent = light ? 'DARK MODE' : 'LIGHT MODE';
+    btn.setAttribute('aria-pressed', String(light));
+  }
+  let light = localStorage.getItem('turret-explainer-theme') === 'light';
+  apply(light);
+  btn.addEventListener('click', () => {
+    light = !light;
+    localStorage.setItem('turret-explainer-theme', light ? 'light' : 'dark');
+    apply(light);
+  });
+</script>
+
+</body>
+</html>

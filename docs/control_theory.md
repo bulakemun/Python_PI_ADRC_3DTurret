@@ -72,6 +72,48 @@ rate, whose integral is the angle.* The gimbal angle/rate are `φ = g_az/g_el`,
 > inner loop is a rate loop around a rate servo (valid, just means the effective
 > rate bandwidth is set by both `τ` and `Kp_s/Ki_s`).
 
+### 3b. Torque plant (selectable) — `TorqueTurretModel`
+
+The second, selectable plant replaces the kinematic velocity servo with a real
+torque-driven second-order axis. Now the inner PI output is a **current command**
+`i_cmd` and the plant makes `τ_cmd = K_t·i_cmd`. Per axis (semi-implicit Euler):
+
+```
+τ_m   = clip(K_t·i_cmd, −τ_max, +τ_max)      τ_max = K_t·i_max   (torque saturation)
+τ_fr  = B·ω + τ_c·sgn(ω)                      viscous + Coulomb friction
+ω    += (τ_m − τ_fr)/J · dt
+φ    += ω · dt
+```
+
+**Karnopp stiction band (no chatter at ω≈0):** if `|ω| < ω_eps` (=1e-3 rad/s) and
+the net applied torque `|τ_m − B·ω| ≤ τ_c`, the axis is *held* (`ω = 0`, static
+friction absorbs the torque — no creep); otherwise it breaks away and Coulomb
+friction `τ_c·sgn(·)` opposes the motion (or, at breakaway from rest, the net
+applied torque). The ±90° elevation stop and the ±180°/s drive-speed clamp remain.
+
+Linearised (ignore Coulomb): `J·ω̇ + B·ω = K_t·i_cmd` ⇒ `ω/i_cmd = K_t/(Js + B)`
+— a first-order rate plant with open-loop time constant `J/B` and DC gain
+`K_t/B`. Per-axis `J` (`J_az > J_el`: azimuth carries the whole gimbal); `B`,
+`τ_c`, `K_t`, `i_max` shared or per-axis.
+
+**Defaults / tuning:** `J_az=6, J_el=2.5 kg·m²; B=1.2 N·m·s/rad; τ_c=0.8 N·m;
+K_t=0.8 N·m/A; i_max=50 A ⇒ τ_max=40 N·m`. Inner gains retuned to
+`Kp_s≈36, Ki_s≈72` — chosen so the closed rate loop τ ≈ 0.15–0.2 s (matching the
+kinematic feel) and disturbance rejection is comparable (0.14° rms vs 0.13°). On
+the torque plant `Kp_s/Ki_s` carry **current per rad/s of rate error** (A·s/rad),
+so their numeric ranges differ from the kinematic (dimensionless / [1/s]) gains;
+the panel reconfigures the sliders per plant. `Kp_pos` is unchanged (still rad/s
+per rad). Out of scope: back-EMF/voltage dynamics, backlash, gravity imbalance.
+
+### 3c. Sensor noise (selectable) — `SimEngine.advance`
+
+Optional zero-mean Gaussian noise is added to the **four measurements fed to the
+controller** — LOS angle (az/el) and LOS rate (az/el) — from a seeded
+`np.random.default_rng` (reproducible; default OFF). The **true state** is used
+for rendering *and* for the recorded/graphed error (`AxisResult.reference` lets
+the engine recompute `reference − true_LOS` instead of the noisy value). Noise
+off ⇒ the rng is never sampled ⇒ bit-identical to the noiseless sim.
+
 ---
 
 ## 4. Disturbance model (Stewart platform) — `simulation/stewart_platform.py`
