@@ -30,6 +30,7 @@ from control.reference_signals import square_wave, sine_wave, constant_wave  # n
 from control.control_system import ControlSystem, Mode  # noqa: E402
 from simulation.stewart_platform import StewartDisturbance  # noqa: E402
 from simulation.target_board import TargetBoard  # noqa: E402
+from simulation.turret_model import TorqueTurretModel  # noqa: E402
 from simulation import visualization as viz  # noqa: E402
 import app  # noqa: E402
 
@@ -450,6 +451,127 @@ def test_timed_recording_auto_save():
           f"last_save_msg={e.last_save_msg!r}")
 
 
+def test_torque_saturation():
+    print("Torque plant - torque saturation limits acceleration")
+    # No friction so the only cap is the torque limit; huge current command.
+    m = TorqueTurretModel(dt=0.01, J_az=6.0, B=0.0, tau_c=0.0, K_t=0.8, i_max=50.0)
+    m.step(1e6, 0.0)
+    dw_max = (0.8 * 50.0) / 6.0 * 0.01   # tau_max / J * dt
+    check("acceleration capped by torque limit", m.azimuth_rate <= dw_max + 1e-12,
+          f"dω={m.azimuth_rate:.6f} <= {dw_max:.6f}")
+
+
+def test_torque_coulomb_breakaway():
+    print("Torque plant - Coulomb breakaway (no creep below, motion above)")
+    kw = dict(dt=0.01, J_az=6.0, B=1.2, tau_c=0.8, K_t=0.8, i_max=50.0)
+    below = TorqueTurretModel(**kw)      # torque = K_t*i = 0.4 < tau_c = 0.8
+    for _ in range(300):
+        below.step(0.5, 0.0)
+    check("no creep below breakaway", abs(below.azimuth) < 1e-9,
+          f"az={np.degrees(below.azimuth):.2e} deg")
+    above = TorqueTurretModel(**kw)      # torque = 1.6 > 0.8
+    for _ in range(300):
+        above.step(2.0, 0.0)
+    check("moves above breakaway", above.azimuth > np.radians(0.1),
+          f"az={np.degrees(above.azimuth):.3f} deg")
+
+
+def test_both_plants_modes_converge():
+    print("Both plants selectable, all three modes converge")
+    for kind in ("kinematic", "torque"):
+        e = app.SimEngine(kind); e.set_mode(Mode.SPEED)
+        e.stewart.yaw_mag_deg = e.stewart.pitch_mag_deg = 0.0
+        e.control.signal = "constant"; e.control.amplitude_rad = np.radians(20.0)
+        for _ in range(600):
+            e.advance()
+        check(f"{kind} SPEED tracks the rate reference",
+              abs(np.degrees(e.turret.azimuth_rate) - 20.0) < 2.0,
+              f"rate={np.degrees(e.turret.azimuth_rate):.2f}")
+
+        e = app.SimEngine(kind); e.set_mode(Mode.POSITION)
+        e.stewart.yaw_mag_deg = e.stewart.pitch_mag_deg = 0.0
+        e.control.signal = "constant"; e.control.amplitude_rad = np.radians(12.0)
+        for _ in range(1200):
+            e.advance()
+        az, _ = viz.los_angles(e.turret.azimuth, e.turret.elevation, 0.0, 0.0)
+        check(f"{kind} POSITION settles at reference",
+              abs(np.degrees(az) - 12.0) < 0.5, f"az={np.degrees(az):.3f}")
+
+        e = app.SimEngine(kind); e.set_mode(Mode.TARGET)
+        e.stewart.yaw_mag_deg = e.stewart.pitch_mag_deg = 0.0
+        for _ in range(1200):
+            e.advance()
+        az, el = viz.los_angles(e.turret.azimuth, e.turret.elevation, 0.0, 0.0)
+        check(f"{kind} TARGET drives error to zero",
+              abs(az - e.target_az) < np.radians(0.5)
+              and abs(el - e.target_el) < np.radians(0.5),
+              f"az err={np.degrees(az - e.target_az):.3f} deg")
+
+
+def test_torque_disturbance_rejection():
+    print("Torque plant - disturbance rejection")
+    e = app.SimEngine("torque"); e.set_mode(Mode.POSITION)
+    e.control.signal = "constant"; e.control.amplitude_rad = 0.0
+    e.stewart.yaw_mag_deg, e.stewart.yaw_freq_hz = 10.0, 0.15
+    errs = []
+    n = 1500
+    for k in range(n):
+        e.advance()
+        if k > n // 2:
+            errs.append(e.az_err)
+    closed = float(np.sqrt(np.mean(np.square(errs))))
+    atten = (np.radians(10.0) / np.sqrt(2.0)) / max(closed, 1e-9)
+    check("torque plant attenuates the base disturbance (>2x)", atten > 2.0,
+          f"atten x{atten:.1f} (closed_rms={np.degrees(closed):.3f} deg)")
+
+
+def test_sensor_noise():
+    print("Sensor noise (measurement only; truth stays clean)")
+    # Off -> the rng is never touched (⇒ bit-identical to the noiseless sim).
+    e = app.SimEngine("kinematic"); e.set_mode(Mode.POSITION)
+    e.control.signal = "constant"; e.control.amplitude_rad = np.radians(10.0)
+    s0 = e.rng.bit_generator.state["state"]["state"]
+    for _ in range(60):
+        e.advance()
+    check("noise off does not consume the rng",
+          e.rng.bit_generator.state["state"]["state"] == s0)
+
+    # On -> the recorded error is the TRUE error (reference - clean LOS), not the
+    # noisy measurement the controller acted on.
+    e = app.SimEngine("torque"); e.set_mode(Mode.POSITION)
+    e.control.signal = "constant"; e.control.amplitude_rad = np.radians(10.0)
+    e.stewart.yaw_mag_deg = e.stewart.pitch_mag_deg = 0.0
+    e.noise_enabled = True
+    e.angle_noise_std, e.rate_noise_std = np.radians(0.5), np.radians(1.5)
+    s1 = e.rng.bit_generator.state["state"]["state"]
+    errs = []
+    for k in range(500):
+        e.advance()
+        if k > 150:
+            errs.append(e.az_err)
+    check("noise on consumes the rng",
+          e.rng.bit_generator.state["state"]["state"] != s1)
+    # If the recorded error were the *noisy* measurement it would carry the full
+    # sensor noise (std >= angle σ). The recorded TRUE error is far smaller.
+    err_std = float(np.std(errs))
+    check("recorded error is the clean/true error, not the noisy measurement",
+          err_std < 0.5 * e.angle_noise_std,
+          f"std(rec err)={np.degrees(err_std):.4f} deg vs σ={np.degrees(e.angle_noise_std):.3f}")
+
+    # Reproducible with a fixed seed; noise actually changes the control input.
+    def run(noise):
+        e = app.SimEngine("torque"); e.set_mode(Mode.POSITION)
+        e.control.signal = "constant"; e.control.amplitude_rad = np.radians(10.0)
+        e.stewart.yaw_mag_deg = e.stewart.pitch_mag_deg = 0.0
+        e.rng = np.random.default_rng(42)
+        e.noise_enabled = noise
+        e.angle_noise_std, e.rate_noise_std = np.radians(0.4), np.radians(1.0)
+        return np.array([(e.advance(), e.az_cmd)[1] for _ in range(300)])
+    a, b, off = run(True), run(True), run(False)
+    check("noise reproducible with a fixed seed", np.allclose(a, b))
+    check("noise changes the control input", not np.allclose(a, off))
+
+
 def test_render_smoke():
     print("Headless render smoke")
     pl, scene, engine = app.build_scene(off_screen=True)
@@ -478,6 +600,9 @@ def main():
               test_disturbance_disable_no_recenter, test_recorder_stddev_footer,
               test_pov_reticle_centered, test_speed_mode_target_error_toggle,
               test_timed_recording_auto_save,
+              test_torque_saturation, test_torque_coulomb_breakaway,
+              test_both_plants_modes_converge, test_torque_disturbance_rejection,
+              test_sensor_noise,
               test_render_smoke):
         t()
     print(f"\n{_PASS} passed, {_FAIL} failed")
