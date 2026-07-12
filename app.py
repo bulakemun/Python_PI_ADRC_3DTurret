@@ -495,17 +495,36 @@ def _make_control_panel(engine: SimEngine):
             self._unit = u
             self._refresh()
 
+        def reconfigure(self, lo, hi, val, step):
+            """Retarget the slider's range/value (e.g. on a plant switch)."""
+            self._lo, self._step = lo, step
+            self._s.blockSignals(True)
+            self._s.setMaximum(int(round((hi - lo) / step)))
+            self._s.setValue(int(round((val - lo) / step)))
+            self._s.blockSignals(False)
+            self._refresh()
+
     w = QtWidgets.QWidget()
     w.setWindowTitle("Turret Control")
-    w.resize(560, 760)
-    root = QtWidgets.QVBoxLayout(w)
+    w.resize(600, 940)
+    outer = QtWidgets.QVBoxLayout(w)
+    outer.setContentsMargins(0, 0, 0, 0)
+    scroll = QtWidgets.QScrollArea()
+    scroll.setWidgetResizable(True)
+    outer.addWidget(scroll)
+    content = QtWidgets.QWidget()
+    scroll.setWidget(content)
+    root = QtWidgets.QVBoxLayout(content)
 
-    # --- Mode + signal selectors ---
+    # --- Plant + mode + signal selectors ---
     form = QtWidgets.QFormLayout()
+    plant_box = QtWidgets.QComboBox()
+    plant_box.addItems(["Kinematic (rate servo)", "Torque (J, B, K, friction)"])
     mode_box = QtWidgets.QComboBox()
     mode_box.addItems(["1 - Speed loop", "2 - Position reference", "3 - Target tracking"])
     signal_box = QtWidgets.QComboBox()
     signal_box.addItems(["square", "sine", "constant"])
+    form.addRow("Plant", plant_box)
     form.addRow("Mode", mode_box)
     form.addRow("Reference signal", signal_box)
     root.addLayout(form)
@@ -517,12 +536,17 @@ def _make_control_panel(engine: SimEngine):
                       lambda v: setattr(cs, "amplitude_rad", np.radians(v)), "deg/s")
     cl.addWidget(FloatSlider("Kp (position, outer)", 1.0, 20.0, cs.kp_pos, 0.5,
                              lambda v: setattr(cs, "kp_pos", v)))
-    # Floored above zero: Kp_s = 0 guts the inner loop (dead/near-unstable
-    # depending on Ki_s and the outer gain).
-    cl.addWidget(FloatSlider("Speed Kp (inner)", 0.5, 20.0, cs.kp_speed, 0.1,
-                             lambda v: setattr(cs, "kp_speed", v)))
-    cl.addWidget(FloatSlider("Speed Ki (inner)", 0.0, 20.0, cs.ki_speed, 0.1,
-                             lambda v: setattr(cs, "ki_speed", v)))
+    # Inner-gain ranges/units depend on the plant (rate command vs current
+    # command); reconfigured on a plant switch. Floored so the inner loop is
+    # never fully gutted (Kp_s = 0 = dead/near-unstable).
+    _kp_ui = PLANT_GAIN_UI[engine.plant_kind]["kp"]
+    _ki_ui = PLANT_GAIN_UI[engine.plant_kind]["ki"]
+    kp_sl = FloatSlider("Speed Kp (inner)", _kp_ui[1], _kp_ui[2], cs.kp_speed,
+                        _kp_ui[3], lambda v: setattr(cs, "kp_speed", v))
+    ki_sl = FloatSlider("Speed Ki (inner)", _ki_ui[1], _ki_ui[2], cs.ki_speed,
+                        _ki_ui[3], lambda v: setattr(cs, "ki_speed", v))
+    cl.addWidget(kp_sl)
+    cl.addWidget(ki_sl)
     cl.addWidget(amp)
     cl.addWidget(FloatSlider("Frequency", 0.05, 2.0, cs.frequency, 0.05,
                              lambda v: setattr(cs, "frequency", v), "Hz"))
@@ -557,6 +581,21 @@ def _make_control_panel(engine: SimEngine):
     dl.addWidget(FloatSlider("Pitch frequency", 0.1, 0.4, stew.pitch_freq_hz, 0.01,
                              lambda v: setattr(stew, "pitch_freq_hz", v), "Hz"))
     root.addWidget(dis)
+
+    # --- Sensor noise group (measurement noise only; truth stays clean) ---
+    noise = QtWidgets.QGroupBox("Sensor noise (on the controller's measurements)")
+    nl = QtWidgets.QVBoxLayout(noise)
+    noise_chk = QtWidgets.QCheckBox("Enable sensor noise")
+    noise_chk.setChecked(engine.noise_enabled)
+    noise_chk.toggled.connect(lambda c: setattr(engine, "noise_enabled", c))
+    nl.addWidget(noise_chk)
+    nl.addWidget(FloatSlider("Angle noise σ", 0.0, 0.5, np.degrees(engine.angle_noise_std),
+                             0.01, lambda v: setattr(engine, "angle_noise_std",
+                                                     np.radians(v)), "deg"))
+    nl.addWidget(FloatSlider("Rate noise σ", 0.0, 2.0, np.degrees(engine.rate_noise_std),
+                             0.05, lambda v: setattr(engine, "rate_noise_std",
+                                                     np.radians(v)), "deg/s"))
+    root.addWidget(noise)
 
     # --- Data logging group ---
     rec = engine.recorder
@@ -648,8 +687,19 @@ def _make_control_panel(engine: SimEngine):
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right", fontsize=8)
     ax.set_xlabel("time (s)")
+    canvas.setMinimumHeight(230)
     root.addWidget(QtWidgets.QLabel("Error signal"))
     root.addWidget(canvas, 1)
+
+    def _apply_plant():
+        kind = "torque" if plant_box.currentIndex() == 1 else "kinematic"
+        engine.set_plant(kind)   # sets default gains + resets state
+        kp = PLANT_GAIN_UI[kind]["kp"]
+        ki = PLANT_GAIN_UI[kind]["ki"]
+        kp_sl.reconfigure(kp[1], kp[2], engine.control.kp_speed, kp[3])
+        ki_sl.reconfigure(ki[1], ki[2], engine.control.ki_speed, ki[3])
+
+    plant_box.currentIndexChanged.connect(lambda _i: _apply_plant())
 
     def _apply_mode():
         idx = mode_box.currentIndex()
