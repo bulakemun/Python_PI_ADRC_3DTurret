@@ -32,7 +32,7 @@ import numpy as np
 import pyvista as pv
 
 from control.control_system import ControlSystem, Mode
-from simulation.turret_model import TurretModel
+from simulation.turret_model import TurretModel, TorqueTurretModel
 from simulation.target_board import TargetBoard
 from simulation.stewart_platform import StewartDisturbance
 from simulation import visualization as viz
@@ -53,6 +53,18 @@ POV_FOV_RANGE = (12.0, 70.0)
 # Error-graph rolling window (seconds).
 GRAPH_WINDOW = 12.0
 _TEXT_BG = (0.04, 0.07, 0.10)
+
+# Torque plant parameters (SI). J_az > J_el: azimuth carries the whole gimbal.
+TORQUE_PARAMS = dict(J_az=6.0, J_el=2.5, B=1.2, tau_c=0.8, K_t=0.8, i_max=50.0)
+
+# Inner-loop gain defaults + slider ranges per plant. The inner PI output is a
+# rate command (kinematic, [-]/[1/s] gains) or a current command (torque, gains
+# in A per rad/s of rate error); retuned so the closed rate loop lands near the
+# kinematic 0.2 s time constant. Values: (default, lo, hi, step).
+PLANT_GAIN_UI = {
+    "kinematic": {"kp": (6.0, 0.5, 20.0, 0.1), "ki": (2.0, 0.0, 20.0, 0.1)},
+    "torque":    {"kp": (36.0, 0.0, 120.0, 1.0), "ki": (72.0, 0.0, 200.0, 1.0)},
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -145,22 +157,29 @@ class Recorder:
 class SimEngine:
     """Owns the plant, disturbance and cascade controller, and steps the loop."""
 
-    def __init__(self):
-        self.turret = TurretModel(dt=DT, tau=0.2, rate_limit=RATE_LIMIT)
+    def __init__(self, plant: str = "kinematic"):
         self.board = TargetBoard(height_m=14.0, width=30.0, height_dim=24.0)
         self.stewart = StewartDisturbance()
 
-        pivot = self.turret.base_position + np.array([0.0, 0.0, viz.PIVOT_HEIGHT])
+        base = np.array([0.0, 0.0, 0.0])
+        pivot = base + np.array([0.0, 0.0, viz.PIVOT_HEIGHT])
         self.target_az, self.target_el = self.board.required_angles(pivot)
         self.control = ControlSystem(DT, RATE_LIMIT, el_hold=self.target_el)
         self.recorder = Recorder()
+
+        # Reproducible measurement-noise generator (measurement noise only; the
+        # true state used for rendering/recording stays clean). Defaults OFF.
+        self.rng = np.random.default_rng(0)
+        self.noise_enabled = False
+        self.angle_noise_std = 0.0   # rad
+        self.rate_noise_std = 0.0    # rad/s
 
         self.t = 0.0
         self.base_yaw = 0.0
         self.base_pitch = 0.0
         self.az_err = 0.0
         self.el_err = 0.0
-        self.az_cmd = 0.0   # last commanded axis rate (control input, rad/s)
+        self.az_cmd = 0.0   # last inner-loop command (rate rad/s, or current A)
         self.el_cmd = 0.0
         # Rolling error history: (t, az_err, el_err) in SI (rad or rad/s by mode).
         maxlen = int(GRAPH_WINDOW / (DT * SUBSTEPS)) + 5
@@ -171,6 +190,27 @@ class SimEngine:
         self._auto_save_path = None
         self._auto_channels = None
         self.last_save_msg = None
+
+        self.plant_kind = None
+        self.set_plant(plant)   # builds self.turret + inner-loop limits/gains
+
+    def set_plant(self, kind: str) -> None:
+        """Select the plant model. Resets plant state + controller integrators."""
+        gains = PLANT_GAIN_UI[kind]
+        if kind == "torque":
+            self.turret = TorqueTurretModel(dt=DT, rate_limit=RATE_LIMIT,
+                                            **TORQUE_PARAMS)
+            self.control.set_inner_limits(self.turret.i_max_az, self.turret.i_max_el)
+        else:
+            self.turret = TurretModel(dt=DT, tau=0.2, rate_limit=RATE_LIMIT)
+            self.control.set_inner_limits(RATE_LIMIT, RATE_LIMIT)
+        self.control.kp_speed = gains["kp"][0]
+        self.control.ki_speed = gains["ki"][0]
+        self.plant_kind = kind
+        self.control.reset()
+        self.history.clear()
+        self.base_yaw = self.base_pitch = 0.0
+        self.az_err = self.el_err = self.az_cmd = self.el_cmd = 0.0
 
     def set_mode(self, mode: Mode) -> None:
         self.control.mode = mode
@@ -213,20 +253,31 @@ class SimEngine:
             self.stewart.advance(DT)   # ramp the on/off envelope smoothly
             by, bp = self.stewart.angles(self.t)
             byr, bpr = self.stewart.rates(self.t)
+            # True line of sight (angle + absolute gyro rate = gimbal + base).
             los_az, los_el = viz.los_angles(turret.azimuth, turret.elevation, by, bp)
-            # Gyro feedback: the inner speed loop regulates the ABSOLUTE line-of-
-            # sight rate (gimbal rate + base rate), so the base disturbance shows
-            # up in the speed error and is rejected -- not just the gimbal rate.
             los_rate_az = turret.azimuth_rate + byr
             los_rate_el = turret.elevation_rate + bpr
+            # Measurement noise feeds ONLY the controller; truth stays clean.
+            if self.noise_enabled:
+                m_az = los_az + self.rng.normal(0.0, self.angle_noise_std)
+                m_el = los_el + self.rng.normal(0.0, self.angle_noise_std)
+                m_raz = los_rate_az + self.rng.normal(0.0, self.rate_noise_std)
+                m_rel = los_rate_el + self.rng.normal(0.0, self.rate_noise_std)
+            else:
+                m_az, m_el, m_raz, m_rel = los_az, los_el, los_rate_az, los_rate_el
             az_res, el_res = cs.step(
-                self.t, los_az, los_rate_az, los_el, los_rate_el,
-                self.target_az, self.target_el,
+                self.t, m_az, m_raz, m_el, m_rel, self.target_az, self.target_el,
             )
             turret.step(az_res.rate_cmd, el_res.rate_cmd)
             self.t += DT
             self.base_yaw, self.base_pitch = by, bp
-        self.az_err, self.el_err = az_res.error, el_res.error
+            # Record the TRUE error (reference vs clean state), not the noisy one.
+            if cs.error_is_rate:
+                self.az_err = az_res.reference - los_rate_az
+                self.el_err = el_res.reference - los_rate_el
+            else:
+                self.az_err = az_res.reference - los_az
+                self.el_err = el_res.reference - los_el
         self.az_cmd, self.el_cmd = az_res.rate_cmd, el_res.rate_cmd
         self.history.append((self.t, self.az_err, self.el_err))
         self.recorder.record((

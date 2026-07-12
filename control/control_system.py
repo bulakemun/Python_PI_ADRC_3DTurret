@@ -50,8 +50,11 @@ class Mode(IntEnum):
 class AxisResult:
     """Per-axis outcome of one control step."""
 
-    rate_cmd: float   # commanded axis rate to the plant (rad/s)
-    error: float      # loop error used for the graph (rad in pos/target, rad/s in speed)
+    rate_cmd: float    # inner-loop output to the plant: rate (rad/s, kinematic)
+                       # or current (A, torque plant) -- the plant interprets it
+    error: float       # loop error the controller acted on (from measurements)
+    reference: float   # the setpoint ``error`` is measured against (rad or rad/s),
+                       # so callers can recompute the *true* error vs clean state
 
 
 class ControlSystem:
@@ -61,11 +64,15 @@ class ControlSystem:
     live. Call :meth:`step` once per plant timestep.
     """
 
-    def __init__(self, dt: float, rate_limit: float, el_hold: float = 0.0) -> None:
+    def __init__(self, dt: float, rate_limit: float, el_hold: float = 0.0,
+                 inner_limit: float = None) -> None:
         self.dt = dt
-        self.rate_limit = rate_limit          # plant rate command limit (rad/s)
+        self.rate_limit = rate_limit          # outer-loop speed-ref clamp (rad/s)
         self.max_speed_ref = rate_limit       # outer-loop speed-ref clamp (rad/s)
         self.el_hold = el_hold                # elevation setpoint pointing at board (rad)
+        # Inner PI output clamp: a rate limit (rad/s) for the kinematic plant, or
+        # a current limit (A) for the torque plant. Defaults to the speed clamp.
+        inner_limit = rate_limit if inner_limit is None else inner_limit
 
         # Live-tunable settings.
         self.mode = Mode.SPEED
@@ -81,14 +88,19 @@ class ControlSystem:
         # SPEED mode.
         self.speed_shows_target_error = False
 
-        limits = (-rate_limit, rate_limit)
+        limits = (-inner_limit, inner_limit)
         speed_limits = (-self.max_speed_ref, self.max_speed_ref)
         # Outer position P controllers (Ki=0) output a speed reference.
         self._az_pos = PIController(self.kp_pos, 0.0, dt, output_limits=speed_limits)
         self._el_pos = PIController(self.kp_pos, 0.0, dt, output_limits=speed_limits)
-        # Inner speed PI controllers output a rate command to the plant.
+        # Inner speed PI controllers output the plant command (rate or current).
         self._az_spd = PIController(self.kp_speed, self.ki_speed, dt, output_limits=limits)
         self._el_spd = PIController(self.kp_speed, self.ki_speed, dt, output_limits=limits)
+
+    def set_inner_limits(self, az_limit: float, el_limit: float) -> None:
+        """Set the inner PI output clamp per axis (rad/s kinematic, A torque)."""
+        self._az_spd.output_limits = (-az_limit, az_limit)
+        self._el_spd.output_limits = (-el_limit, el_limit)
 
     # ------------------------------------------------------------------ #
     def reset(self) -> None:
@@ -152,10 +164,11 @@ class ControlSystem:
             az_cmd = self._az_spd.step(az_err)
             el_cmd = self._el_spd.step(el_err)
             if self.speed_shows_target_error:
-                az_pos_err = target_az - los_az
-                el_pos_err = target_el - los_el
-                return (AxisResult(az_cmd, az_pos_err), AxisResult(el_cmd, el_pos_err))
-            return (AxisResult(az_cmd, az_err), AxisResult(el_cmd, el_err))
+                # Report the target position error instead (against los angle).
+                return (AxisResult(az_cmd, target_az - los_az, target_az),
+                        AxisResult(el_cmd, target_el - los_el, target_el))
+            return (AxisResult(az_cmd, az_err, az_speed_ref),
+                    AxisResult(el_cmd, el_err, el_speed_ref))
 
         # POSITION / TARGET: full cascade on the line-of-sight position.
         if self.mode == Mode.TARGET:
@@ -169,4 +182,5 @@ class ControlSystem:
         el_speed_ref = self._el_pos.step(el_pos_err)
         az_cmd = self._speed_loop(self._az_spd, az_speed_ref, rate_az)
         el_cmd = self._speed_loop(self._el_spd, el_speed_ref, rate_el)
-        return (AxisResult(az_cmd, az_pos_err), AxisResult(el_cmd, el_pos_err))
+        return (AxisResult(az_cmd, az_pos_err, az_ref),
+                AxisResult(el_cmd, el_pos_err, el_ref))
